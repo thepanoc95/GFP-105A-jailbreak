@@ -1,0 +1,13 @@
+diff --git a/Makefile b/Makefile
+index 0c60fd4..e108b16 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,6 +1,6 @@
+-
++CC := gcc
+ LIBUSB = 1
+-CFLAGS = -O2 -Wall -Wextra -std=c99 -pedantic -Wno-unused
++CFLAGS = -O2 -Wall -Wextra -std=c99 -pedantic -Wno-unused -I/usr/include
+ CFLAGS += -DUSE_LIBUSB=$(LIBUSB)
+ 
+ ifeq ($(LIBUSB), 1)

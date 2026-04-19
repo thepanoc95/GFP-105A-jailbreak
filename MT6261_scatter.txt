@@ -1,0 +1,33 @@
+############################################
+# MT6261 Scatter File - WD031 board
+############################################
+
+__PRELOADER__
+partition_name: PRELOADER
+file_name: preloader.bin
+is_download: true
+type: SV5_BL_BIN
+linear_start_addr: 0x00000000
+physical_start_addr: 0x00000000
+partition_size: 0x00040000
+region: EMMC_BOOT_1
+storage: HW_STORAGE_NOR
+boundary_check: true
+is_reserved: false
+operation_type: BOOTLOADERS
+reserve: 0x00
+
+__ROM__
+partition_name: ROM
+file_name: rom.bin
+is_download: true
+type: NORMAL_ROM
+linear_start_addr: 0x00040000
+physical_start_addr: 0x00040000
+partition_size: 0x003C0000
+region: EMMC_BOOT_1
+storage: HW_STORAGE_NOR
+boundary_check: true
+is_reserved: false
+operation_type: UPDATE
+reserve: 0x00

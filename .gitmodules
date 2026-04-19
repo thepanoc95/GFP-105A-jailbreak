@@ -1,0 +1,6 @@
+[submodule "mtkflasher"]
+	path = mtkflasher
+	url = https://github.com/waybyte/tool-pymtkflasher
+[submodule "mtkfirmdumper"]
+	path = mtkfirmdumper
+	url = https://github.com/ilyakurdyukov/mediatek_flash
