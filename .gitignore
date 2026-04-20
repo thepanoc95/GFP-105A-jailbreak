@@ -9,7 +9,7 @@ wheels/
 # Virtual environments
 .venv
 dump.bin
-*.bin
+out.bin
 *.o
 *.obj
 *.a
