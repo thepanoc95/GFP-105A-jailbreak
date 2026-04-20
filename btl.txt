@@ -1,0 +1,4 @@
+first-init: vma=0x70007280 => file offset 0x007a80
+  bytes: 70009fe570109fe5
+second_init: vma=0x700071c8 => file offset 0x0079c8
+  bytes: 0e70a0e1d4009fe5

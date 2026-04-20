@@ -1,0 +1,101 @@
+diff --git a/toke/conditl.c b/toke/conditl.c
+index b491310..3673950 100644
+--- a/toke/conditl.c
++++ b/toke/conditl.c
+@@ -630,6 +630,10 @@ static void if_exists( tic_param_t pfield )
+     conditional_word_in_line( alr_ign, true, exists_in_current );
+ }
+ 
++static void _if_exists_wrap(void) {
++	if_exists(/* ??? */);
++}
++
+ /* **************************************************************************
+  *
+  *      Function name:  if_not_exist
+@@ -652,6 +656,10 @@ static void if_not_exist( tic_bool_param_t pfield )
+     conditional_word_in_line( alr_ign, false, exists_in_current );
+ }
+ 
++static void _if_not_exist_wrap(void) {
++	if_not_exist(/* ??? */);
++}
++
+ /* **************************************************************************
+  *
+  *      Function name:  if_defined
+@@ -669,6 +677,10 @@ static void if_defined( tic_bool_param_t pfield )
+     conditional_word_in_line( alr_ign, true, exists_as_user_symbol );
+ }
+ 
++static void _if_defined_wrap(void) {
++    if_defined(/* ??? */);
++}
++
+ /* **************************************************************************
+  *
+  *      Function name:  if_not_defined
+@@ -686,6 +698,10 @@ static void if_not_defined( tic_bool_param_t pfield )
+     conditional_word_in_line( alr_ign, false, exists_as_user_symbol );
+ }
+ 
++static void _if_not_defined_wrap(void) {
++	if_not_defined(/* ??? */);
++}
++
+ 
+ /* **************************************************************************
+  *
+@@ -720,6 +736,10 @@ static void if_from_stack( tic_bool_param_t pfield )
+     conditionally_tokenize( cond, alr_ign );
+ }
+ 
++static void _if_from_stack_wrap(void) {
++   if_from_stack(/* ??? */);
++}
++
+ /*  For future functions, use  conditl.BlankTemplate.c  */
+ 
+ /* **************************************************************************
+@@ -731,23 +751,25 @@ static void if_from_stack( tic_bool_param_t pfield )
+ 
+ #define ADD_CONDL(str, func )   BUILTIN_BOOL_TIC(str, func, already_ignoring )
+ 
++// TODO: fix wrappers.
++
+ static tic_bool_hdr_t conditionals_vocab_tbl[] = {
+-    ADD_CONDL ("[ifexist]"   , if_exists      ) ,
+-    ADD_CONDL ("[ifexists]"  , if_exists      ) ,
+-    ADD_CONDL ("#ifexist"    , if_exists      ) ,
+-    ADD_CONDL ("#ifexists"   , if_exists      ) ,
+-    ADD_CONDL ("[#ifexist]"  , if_exists      ) ,
+-    ADD_CONDL ("[#ifexists]" , if_exists      ) ,
+-    ADD_CONDL ("[ifnexist]"  , if_not_exist   ) ,
+-    ADD_CONDL ("#ifnexist"   , if_not_exist   ) ,
+-    ADD_CONDL ("[#ifnexist]" , if_not_exist   ) ,
+-    ADD_CONDL ("[ifdef]"     , if_defined     ) ,
+-    ADD_CONDL ("#ifdef"      , if_defined     ) ,
+-    ADD_CONDL ("[#ifdef]"    , if_defined     ) ,
+-    ADD_CONDL ("[ifndef]"    , if_not_defined ) ,
+-    ADD_CONDL ("#ifndef"     , if_not_defined ) ,
+-    ADD_CONDL ("[#ifndef]"   , if_not_defined ) ,
+-    ADD_CONDL ("[if]"        , if_from_stack  )
++    ADD_CONDL ("[ifexist]"   , _if_exists_wrap      ) ,
++    ADD_CONDL ("[ifexists]"  , _if_exists_wrap      ) ,
++    ADD_CONDL ("#ifexist"    , _if_exists_wrap      ) ,
++    ADD_CONDL ("#ifexists"   , _if_exists_wrap      ) ,
++    ADD_CONDL ("[#ifexist]"  , _if_exists_wrap      ) ,
++    ADD_CONDL ("[#ifexists]" , _if_exists_wrap      ) ,
++    ADD_CONDL ("[ifnexist]"  , _if_not_exist_wrap   ) ,
++    ADD_CONDL ("#ifnexist"   , _if_not_exist_wrap   ) ,
++    ADD_CONDL ("[#ifnexist]" , _if_not_exist_wrap   ) ,
++    ADD_CONDL ("[ifdef]"     , _if_defined_wrap     ) ,
++    ADD_CONDL ("#ifdef"      , _if_defined_wrap     ) ,
++    ADD_CONDL ("[#ifdef]"    , _if_defined_wrap     ) ,
++    ADD_CONDL ("[ifndef]"    , _if_not_defined_wrap ) ,
++    ADD_CONDL ("#ifndef"     , _if_not_defined_wrap ) ,
++    ADD_CONDL ("[#ifndef]"   , _if_not_defined_wrap ) ,
++    ADD_CONDL ("[if]"        , _if_from_stack_wrap  ) // if_from_stack
+ };
+ 
+ 

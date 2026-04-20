@@ -4,3 +4,6 @@
 [submodule "mtkfirmdumper"]
 	path = mtkfirmdumper
 	url = https://github.com/ilyakurdyukov/mediatek_flash
+[submodule "fcode-utils"]
+	path = fcode-utils
+	url = https://github.com/openbios/fcode-utils
