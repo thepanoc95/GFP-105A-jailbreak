@@ -1,0 +1,2159 @@
+diff --git a/arch/arm/build.xml b/arch/arm/build.xml
+new file mode 100644
+index 0000000..cf8bbe6
+--- /dev/null
++++ b/arch/arm/build.xml
+@@ -0,0 +1,3 @@
++<build condition="ARM_MT6261">
++ <include source="arch/arm/mt6261/build.xml"/>
++</build>
+diff --git a/arch/arm/mt6261/build.xml b/arch/arm/mt6261/build.xml
+new file mode 100644
+index 0000000..4013080
+--- /dev/null
++++ b/arch/arm/mt6261/build.xml
+@@ -0,0 +1,37 @@
++<build condition="ARM_MT6261">
++
++ <!-- OpenPhone Forth dictionary for GFP-105A -->
++ <dictionary name="openbios-arm-mt6261" init="openbios">
++  <object source="cpu.fs"  target="forth"/>
++  <object source="init.fs" target="forth"/>
++ </dictionary>
++
++ <!-- MT6261 arch library -->
++ <library name="arm-mt6261" type="static" target="target">
++  <object source="openbios.c"/>
++  <object source="uart.c"/>
++  <object source="msdc.c"/>
++  <object source="usb_cdc.c"/>
++  <object source="devices.c"/>
++  <object source="entry.S"/>
++ </library>
++
++ <!-- Stage 1 flat binary (GFH shim — flashed to NOR) -->
++ <executable name="openphone-stage1.elf" target="target" condition="IMAGE_ELF">
++  <rule>
++	$(call quiet-command,$(LD) --warn-common -N -T $(SRCDIR)/arch/arm/mt6261/ldscript -o $@.nostrip --whole-archive $^,   "  LINK  $(TARGET_DIR)$@")
++	$(call quiet-command,$(NM) $@.nostrip | sort > $(ODIR)/openphone-stage1.syms,                                          "  GEN   $(TARGET_DIR)$@.syms")
++	$(call quiet-command,$(STRIP) $@.nostrip -o $@,                                                                        "  STRIP $(TARGET_DIR)$@")
++	$(call quiet-command,$(OBJCOPY) -O binary $@ $(ODIR)/openphone-stage1.bin,                                             "  BIN   $(TARGET_DIR)openphone-stage1.bin")
++	$(call quiet-command,python3 $(SRCDIR)/arch/arm/mt6261/pack_gfh.py $(ODIR)/openphone-stage1.bin $(GFH_DUMP) $(ODIR)/openphone-stage1-final.bin, "  GFH   $(TARGET_DIR)openphone-stage1-final.bin")</rule>
++  <external-object source="libarm-mt6261.a"/>
++  <external-object source="libbootstrap.a"/>
++  <external-object source="libopenbios.a"/>
++  <external-object source="libpackages.a"/>
++  <external-object source="libdrivers.a"/>
++  <external-object source="libfs.a"/>
++  <external-object source="liblibc.a"/>
++  <external-object source="libgcc.a"/>
++ </executable>
++
++</build>
+diff --git a/arch/arm/mt6261/cpu.fs b/arch/arm/mt6261/cpu.fs
+new file mode 100644
+index 0000000..7beaa32
+--- /dev/null
++++ b/arch/arm/mt6261/cpu.fs
+@@ -0,0 +1,115 @@
++\ arch/arm/mt6261/cpu.fs
++\ OpenPhone — MT6261 CPU Forth words
++\
++\ Copyright (C) 2026 OpenPhone Project
++\ SPDX-License-Identifier: GPL-2.0-only
++\
++\ Defines low-level Forth words for MT6261 hardware access.
++\ These are available from the OpenPhone 'ok' prompt.
++
++." OpenPhone MT6261 CPU words loading..." cr
++
++\ ── Memory-mapped I/O ───────────────────────────────────────────────────────
++
++\ ( addr -- val )  Read 32-bit register
++: l@  ( addr -- val )  dup  @ ;
++
++\ ( val addr -- )  Write 32-bit register
++: l!  ( val addr -- )  ! ;
++
++\ ( addr -- val )  Read 8-bit register
++: c@r  ( addr -- val )  c@ ;
++
++\ ( val addr -- )  Write 8-bit register
++: c!r  ( val addr -- )  c! ;
++
++\ ── MT6261 peripheral base addresses ────────────────────────────────────────
++
++hex
++
++80030000 constant UART0-BASE
++80050000 constant MSDC-BASE
++80020000 constant GPIO-BASE
++80000000 constant CONFG-BASE
++
++\ ── UART convenience words ──────────────────────────────────────────────────
++
++\ ( -- val )  Read UART0 line status register
++: uart-lsr  ( -- val )  UART0-BASE 14 + l@ ;
++
++\ ( -- flag )  True if TX holding register is empty
++: uart-txrdy  ( -- flag )  uart-lsr 20 and 0<> ;
++
++\ ( char -- )  Send one character via UART0
++: uart-emit  ( char -- )
++    begin uart-txrdy until
++    UART0-BASE l! ;
++
++\ ( -- char )  Receive one character from UART0 (blocking)
++: uart-key  ( -- char )
++    begin uart-lsr 1 and until
++    UART0-BASE l@ ff and ;
++
++\ ── MSDC / SD card words ────────────────────────────────────────────────────
++
++\ ( -- )  Display MSDC config register
++: msdc-status  ( -- )
++    ." MSDC_CFG:    " MSDC-BASE l@ .  cr
++    ." MSDC_INT:    " MSDC-BASE 0c + l@ . cr
++    ." MSDC_SDC_STS:" MSDC-BASE 3c + l@ . cr ;
++
++\ ( lba buf -- )  Read one 512-byte sector from SD card
++\ Calls the C function registered by mt6261_devices_init
++: sd-read-sector  ( lba buf -- result )
++    msdc-read-sector ;
++
++\ ── GPIO words ──────────────────────────────────────────────────────────────
++
++\ ( pin -- val )  Read GPIO pin state
++: gpio@  ( pin -- val )
++    GPIO-BASE swap 4 * + l@ ;
++
++\ ( val pin -- )  Write GPIO pin
++: gpio!  ( val pin -- )
++    GPIO-BASE swap 4 * + l! ;
++
++\ ── System info ─────────────────────────────────────────────────────────────
++
++: .sysinfo  ( -- )
++    ." OpenPhone v0.1" cr
++    ." Board:  Gradiente Neo Flip 105A (GFP-105A)" cr
++    ." SoC:    MediaTek MT6261 @ 104MHz" cr
++    ." SRAM:   256KB @ " 70000000 . cr
++    ." UART:   115200 8N1 @ " UART0-BASE . cr
++    ." MSDC:   SD card @ " MSDC-BASE . cr ;
++
++\ ── Boot words ──────────────────────────────────────────────────────────────
++
++\ ( -- )  Load and boot from SD card sector 1
++: sd-boot  ( -- )
++    ." Loading from SD..." cr
++    1                       \ start sector
++    70010000                \ load address
++    msdc-read-sector drop
++    ." Jumping to loaded image..." cr
++    70010000 execute ;
++
++\ ── USB CDC words ───────────────────────────────────────────────────────────
++
++80060000 constant USB-BASE
++
++\ ( -- flag )  True if USB host has configured device
++: usb-ready?  ( -- flag )  usb_cdc_configured ;
++
++\ ( -- )  Print active console type
++: .console  ( -- )
++    usb-ready? if
++        ." Console: USB CDC ACM (/dev/ttyACM0)" cr
++    else
++        ." Console: UART0 @ 115200 8N1" cr
++    then ;
++
++decimal
++
++." MT6261 words loaded. Type .sysinfo for system info." cr
++." Type sd-boot to boot from SD card." cr
+diff --git a/arch/arm/mt6261/devices.c b/arch/arm/mt6261/devices.c
+new file mode 100644
+index 0000000..6d1dfc1
+--- /dev/null
++++ b/arch/arm/mt6261/devices.c
+@@ -0,0 +1,107 @@
++/* arch/arm/mt6261/devices.c
++ * OpenPhone — MT6261 device package registration
++ *
++ * Copyright (C) 2026 OpenPhone Project
++ * SPDX-License-Identifier: GPL-2.0-only
++ *
++ * Registers Forth device packages (drivers) into the OpenFirmware
++ * device tree. Called from arch_of_init() after the Forth kernel
++ * is running.
++ */
++
++#include "config.h"
++#include "libopenbios/bindings.h"
++#include "libopenbios/ofmem.h"
++#include "drivers/drivers.h"
++#include "mt6261.h"
++
++/* Forward declarations */
++int mt6261_msdc_init(void);
++int mt6261_msdc_read(void *dst, unsigned int lba, unsigned int count);
++void uart_puts(const char *s);
++void uart_puthex(unsigned int v);
++
++/* ── UART Forth package ─────────────────────────────────────────────────── */
++
++/*
++ * ( -- )  emit  ( char -- )
++ * OpenFirmware UART emit word.
++ */
++static void uart_emit_word(void)
++{
++    int c = POP();
++    extern void uart_putc(int);
++    uart_putc(c);
++}
++
++/*
++ * ( -- char )  key
++ */
++static void uart_key_word(void)
++{
++    extern int uart_getc(void);
++    PUSH(uart_getc());
++}
++
++/*
++ * ( -- flag )  key?
++ */
++static void uart_key_q_word(void)
++{
++    extern int uart_tstc(void);
++    PUSH(uart_tstc() ? -1 : 0);
++}
++
++static void mt6261_uart_register(void)
++{
++    bind_func("mt6261-uart-emit",  uart_emit_word);
++    bind_func("mt6261-uart-key",   uart_key_word);
++    bind_func("mt6261-uart-key?",  uart_key_q_word);
++
++    /* Patch OpenFirmware emit/key to use our UART */
++    feval("['] mt6261-uart-emit to emit");
++    feval("['] mt6261-uart-key  to key");
++    feval("['] mt6261-uart-key? to key?");
++}
++
++/* ── MSDC / SD card Forth package ───────────────────────────────────────── */
++
++/*
++ * ( lba buf -- flag )  msdc-read-sector
++ * Read one 512-byte sector from SD card into buf.
++ * Returns 0 on success, -1 on error.
++ */
++static void msdc_read_sector_word(void)
++{
++    void *buf    = (void *)POP();
++    unsigned int lba = (unsigned int)POP();
++    int result   = mt6261_msdc_read(buf, lba, 1);
++    PUSH(result);
++}
++
++/*
++ * ( -- )  msdc-init
++ */
++static void msdc_init_word(void)
++{
++    int result = mt6261_msdc_init();
++    PUSH(result);
++}
++
++static void mt6261_msdc_register(void)
++{
++    bind_func("msdc-init",        msdc_init_word);
++    bind_func("msdc-read-sector", msdc_read_sector_word);
++}
++
++/* ── Register all MT6261 devices ────────────────────────────────────────── */
++
++void mt6261_devices_init(void)
++{
++    uart_puts("Registering MT6261 device packages...\r\n");
++
++    mt6261_uart_register();
++    mt6261_msdc_register();
++
++    uart_puts("Devices OK\r\n");
++}
+diff --git a/arch/arm/mt6261/entry.S b/arch/arm/mt6261/entry.S
+new file mode 100644
+index 0000000..c2e834b
+--- /dev/null
++++ b/arch/arm/mt6261/entry.S
+@@ -0,0 +1,120 @@
++/*
++ * arch/arm/mt6261/entry.S
++ * OpenPhone - OpenBIOS port for ARM/MT6261
++ * Target: Gradiente Neo Flip 105A (GFP-105A)
++ *
++ * Copyright (C) 2026 OpenPhone Project
++ * SPDX-License-Identifier: GPL-2.0-only
++ *
++ * Entry point layout in NOR flash:
++ *   0x000  GFH header placeholder (0x60 bytes, patched by pack_gfh.py)
++ *   0x060  ARM exception vector table
++ *   0x080  _start — actual BROM entry
++ *
++ * The BROM loads us to SRAM at 0x70006000 and jumps to entry point
++ * at load_addr + jump_off = 0x70006000 + 0x140 = 0x70006140.
++ * Our linker places _start at that address.
++ */
++
++#include "mt6261.h"
++
++    .syntax unified
++    .arch   armv4t
++    .arm
++
++/* ── GFH header placeholder ─────────────────────────────────────────────────
++ * 0x60 bytes of zeros. pack_gfh.py overwrites this with the real GFH
++ * extracted from the OEM firmware dump before flashing.
++ */
++    .section .gfh, "a"
++    .global _gfh_placeholder
++_gfh_placeholder:
++    .fill 0x60, 1, 0x00
++
++/* ── ARM exception vector table ─────────────────────────────────────────────
++ * Placed at load_addr (0x70006000) after GFH.
++ * The BROM copies us to SRAM so this becomes the live vector table.
++ */
++    .section .vectors, "ax"
++    .global _vectors
++_vectors:
++    ldr     pc, =_start             /* 0x00  Reset            */
++    ldr     pc, =_undef_handler     /* 0x04  Undefined        */
++    ldr     pc, =_swi_handler       /* 0x08  SWI              */
++    ldr     pc, =_prefetch_handler  /* 0x0C  Prefetch abort   */
++    ldr     pc, =_data_handler      /* 0x10  Data abort       */
++    .word   0x00000000              /* 0x14  Reserved         */
++    ldr     pc, =_irq_handler       /* 0x18  IRQ              */
++    ldr     pc, =_fiq_handler       /* 0x1C  FIQ              */
++
++/* ── Exception handlers ─────────────────────────────────────────────────── */
++_undef_handler:
++    ldr     r0, =str_undef
++    bl      uart_puts
++    b       .
++
++_swi_handler:
++_prefetch_handler:
++_data_handler:
++_irq_handler:
++_fiq_handler:
++    b       .
++
++/* ── _start — Stage 1 entry point ───────────────────────────────────────────
++ * Placed at 0x70006140 (load_addr + jump_off from GFH).
++ * BROM jumps here after loading us into SRAM.
++ */
++    .section .text.start, "ax"
++    .global _start
++_start:
++    /* Disable IRQ + FIQ, enter SVC mode */
++    msr     cpsr_c, #0xD3
++
++    /* Stack at top of our SRAM region */
++    ldr     sp, =OPENPHONE_STACK_TOP
++
++    /* Clear BSS */
++    ldr     r0, =__bss_start
++    ldr     r1, =__bss_end
++    mov     r2, #0
++.Lbss_clear:
++    cmp     r0, r1
++    strlo   r2, [r0], #4
++    blo     .Lbss_clear
++
++    /* Initialise UART0 for console I/O */
++    bl      mt6261_uart_init
++
++    /* Print OpenPhone banner */
++    ldr     r0, =str_banner
++    bl      uart_puts
++
++    /* Initialise SD card controller */
++    bl      mt6261_msdc_init
++
++    /* Load OpenBIOS image from SD into SRAM */
++    ldr     r0, =OPENBIOS_LOAD_ADDR
++    mov     r1, #OPENBIOS_SD_SECTOR
++    mov     r2, #OPENBIOS_SD_SECTORS
++    bl      mt6261_msdc_read
++
++    /* Jump to OpenBIOS */
++    ldr     r0, =str_jumping
++    bl      uart_puts
++    ldr     r3, =OPENBIOS_LOAD_ADDR
++    bx      r3
++
++    /* Should never reach here */
++    b       .
++
++/* ── String constants ───────────────────────────────────────────────────── */
++    .section .rodata
++str_banner:
++    .asciz  "\r\n\r\nOpenPhone/" OPENPHONE_VERSION "\r\n"
++    .asciz  "GFP-105A / MT6261 / WD031 SS V00\r\n\r\n"
++str_jumping:
++    .asciz  "Jumping to OpenBIOS...\r\n"
++str_undef:
++    .asciz  "\r\n*** Undefined instruction ***\r\n"
++
++    .end
+diff --git a/arch/arm/mt6261/init.fs b/arch/arm/mt6261/init.fs
+new file mode 100644
+index 0000000..bec5172
+--- /dev/null
++++ b/arch/arm/mt6261/init.fs
+@@ -0,0 +1,32 @@
++\ arch/arm/mt6261/init.fs
++\ OpenPhone — MT6261 OpenBIOS initialisation Forth
++\
++\ Copyright (C) 2026 OpenPhone Project
++\ SPDX-License-Identifier: GPL-2.0-only
++\
++\ Called by the OpenBIOS core after the Forth kernel is running.
++\ Sets up the /chosen paths and OpenFirmware environment.
++
++." OpenPhone initialising..." cr
++
++\ Set up stdin/stdout to use UART
++" /uart@80030000" open-dev
++dup " stdin"  chosen-set
++dup " stdout" chosen-set
++drop
++
++\ Set default boot device to SD card
++" /msdc@80050000:1" " bootpath" chosen-set
++
++\ Set model string
++" Gradiente Neo Flip 105A" " model" chosen-set
++" OpenPhone GFP-105A"      " banner-name" chosen-set
++
++\ Print the OpenFirmware banner
++cr
++." OpenPhone OpenBIOS v0.1" cr
++." Copyright (C) 2026 OpenPhone Project" cr
++." Based on OpenBIOS -- https://openbios.org/" cr
++cr
++." GFP-105A / MediaTek MT6261 / WD031 SS V00" cr
++cr
+diff --git a/arch/arm/mt6261/ldscript b/arch/arm/mt6261/ldscript
+new file mode 100644
+index 0000000..5ca58a6
+--- /dev/null
++++ b/arch/arm/mt6261/ldscript
+@@ -0,0 +1,105 @@
++/* arch/arm/mt6261/ldscript
++ * OpenPhone linker script for MT6261/GFP-105A
++ *
++ * Memory layout:
++ *
++ *   NOR Flash (what gets flashed):
++ *     0x000000  .gfh         GFH header placeholder (0x60 bytes)
++ *               .vectors     ARM exception vectors
++ *               .text        Stage 1 code
++ *               .rodata      Read-only data / strings
++ *
++ *   SRAM (runtime, after BROM loads us):
++ *     0x70006000  .vectors   ARM exception vectors (VMA)
++ *     0x70006020  .text      Code
++ *     ...         .rodata
++ *     ...         .data
++ *     ...         .bss       Zeroed by entry.S
++ *     0x70006140  _start     Entry point (GFH load_addr + jump_off)
++ *     0x70010000             OpenBIOS image loaded here by Stage 1
++ *     0x7003FFFC             Stack top (grows down)
++ *
++ * The GFH load_addr is 0x70006000 so the BROM copies NOR[0x60..]
++ * into SRAM[0x70006000..]. VMA reflects SRAM addresses.
++ * LMA (load address) is NOR offset.
++ */
++
++OUTPUT_FORMAT("elf32-littlearm")
++OUTPUT_ARCH(arm)
++ENTRY(_start)
++
++/* GFH-derived constants */
++GFH_LOAD_ADDR   = 0x70006000;
++GFH_JUMP_OFF    = 0x00000140;
++ENTRY_POINT     = GFH_LOAD_ADDR + GFH_JUMP_OFF;   /* 0x70006140 */
++
++STACK_SIZE      = 0x4000;   /* 16KB stack */
++
++SECTIONS
++{
++    /* GFH placeholder — at NOR offset 0, not loaded into SRAM */
++    .gfh 0x00000000 (NOLOAD) :
++    {
++        KEEP(*(.gfh))
++    }
++
++    /* Everything else loads into SRAM at GFH_LOAD_ADDR */
++    . = GFH_LOAD_ADDR;
++    _start_of_image = .;
++
++    /* Exception vectors — at SRAM base (0x70006000) */
++    .vectors GFH_LOAD_ADDR :
++    {
++        KEEP(*(.vectors))
++    }
++
++    /* Entry point must land at exactly GFH_LOAD_ADDR + GFH_JUMP_OFF */
++    . = ENTRY_POINT;
++
++    /* Code */
++    .text :
++    {
++        *(.text.start)      /* _start must be first */
++        *(.text*)
++    }
++
++    /* Read-only data */
++    .rodata :
++    {
++        _rodata = .;
++        *(.rodata*)
++        _erodata = .;
++    }
++
++    /* Initialised data */
++    .data :
++    {
++        _data = .;
++        *(.data*)
++        _edata = .;
++    }
++
++    /* Uninitialised data — zeroed by entry.S */
++    .bss :
++    {
++        __bss_start = .;
++        *(.bss*)
++        *(COMMON)
++        . = ALIGN(4);
++        __bss_end = .;
++    }
++
++    /* Stack — grows down from top of our SRAM region */
++    _stack_top = 0x70040000 - 4;
++
++    /* OpenBIOS image loaded by Stage 1 to 0x70010000 */
++    _openbios_load_addr = 0x70010000;
++
++    /DISCARD/ :
++    {
++        *(.ARM.exidx*)
++        *(.ARM.attributes*)
++        *(.comment)
++        *(.note*)
++    }
++}
+diff --git a/arch/arm/mt6261/msdc.c b/arch/arm/mt6261/msdc.c
+new file mode 100644
+index 0000000..8de5bcb
+--- /dev/null
++++ b/arch/arm/mt6261/msdc.c
+@@ -0,0 +1,228 @@
++/* arch/arm/mt6261/msdc.c
++ * MT6261 MSDC (SD/MMC controller) driver
++ * Minimal PIO-mode driver for reading SD card sectors
++ *
++ * Copyright (C) 2026 OpenPhone Project
++ * SPDX-License-Identifier: GPL-2.0-only
++ *
++ * NOTE: The MSDC init sequence here is based on MT6261 community
++ * documentation and the MTK feature phone SDK. Verify against
++ * dump_preloader.bin disassembly once a proper disassembler is
++ * available on the host machine.
++ */
++
++#include "config.h"
++#include "mt6261.h"
++
++#define REG32(addr)     (*(volatile unsigned int *)(addr))
++
++static inline void msdc_writel(unsigned int val, unsigned int off)
++{
++    REG32(MT6261_MSDC_BASE + off) = val;
++}
++
++static inline unsigned int msdc_readl(unsigned int off)
++{
++    return REG32(MT6261_MSDC_BASE + off);
++}
++
++/* Card RCA assigned during init */
++static unsigned int sd_rca;
++/* SDHC flag — affects addressing (byte vs sector) */
++static int sd_sdhc;
++
++/* ── Delay loop ─────────────────────────────────────────────────────────── */
++static void msdc_delay(unsigned int us)
++{
++    /* Rough busy-wait. MT6261 runs at ~104MHz.
++     * ~104 iterations ≈ 1µs (very approximate). */
++    volatile unsigned int i = us * 104;
++    while (i--)
++        ;
++}
++
++/* ── Wait for command ready / timeout ──────────────────────────────────── */
++static int msdc_wait_cmd_ready(void)
++{
++    unsigned int timeout = 100000;
++    while (timeout--) {
++        unsigned int sts = msdc_readl(MSDC_SDC_STS);
++        if (!(sts & SDC_STS_CMDBUSY))
++            return 0;
++    }
++    return -1; /* timeout */
++}
++
++static int msdc_wait_int(unsigned int mask)
++{
++    unsigned int timeout = 1000000;
++    while (timeout--) {
++        unsigned int intr = msdc_readl(MSDC_INT);
++        if (intr & mask) {
++            msdc_writel(mask, MSDC_INT); /* clear */
++            return 0;
++        }
++        /* Check for error bits */
++        if (intr & (MSDC_INT_CMDTO | MSDC_INT_RSPCRCERR |
++                    MSDC_INT_DATTMO | MSDC_INT_DATCRCERR)) {
++            msdc_writel(intr, MSDC_INT); /* clear all */
++            return -1;
++        }
++    }
++    return -1;
++}
++
++/* ── Send SD command ────────────────────────────────────────────────────── */
++static int msdc_send_cmd(unsigned int cmd, unsigned int arg,
++                         unsigned int rsptyp, unsigned int *resp)
++{
++    unsigned int cmdval;
++
++    if (msdc_wait_cmd_ready())
++        return -1;
++
++    /* Clear interrupts */
++    msdc_writel(0xFFFFFFFF, MSDC_INT);
++
++    msdc_writel(arg, MSDC_SDC_ARG);
++
++    cmdval = (cmd & SDC_CMD_CMD_MASK) |
++             (rsptyp << SDC_CMD_RSPTYP_SHIFT);
++    msdc_writel(cmdval, MSDC_SDC_CMD);
++
++    if (msdc_wait_int(MSDC_INT_CMDRDY))
++        return -1;
++
++    if (resp)
++        *resp = msdc_readl(MSDC_SDC_RESP0);
++
++    return 0;
++}
++
++/* ── Set clock divider ──────────────────────────────────────────────────── */
++static void msdc_set_clock(unsigned int div)
++{
++    unsigned int cfg = msdc_readl(MSDC_CFG);
++    cfg &= ~MSDC_CFG_CKDIV_MASK;
++    cfg |= (div << MSDC_CFG_CKDIV_SHIFT);
++    msdc_writel(cfg, MSDC_CFG);
++    /* Wait for clock stable */
++    msdc_delay(10);
++}
++
++/* ── Public: initialise MSDC and SD card ────────────────────────────────── */
++int mt6261_msdc_init(void)
++{
++    unsigned int resp;
++    unsigned int ocr;
++    unsigned int timeout;
++
++    extern void uart_puts(const char *);
++
++    uart_puts("MSDC: init...\r\n");
++
++    /* 1. Enable MSDC clock */
++    REG32(MT6261_PDN_CLR0) = PDN0_MSDC;
++    msdc_delay(100);
++
++    /* 2. Reset MSDC */
++    msdc_writel(MSDC_CFG_RST, MSDC_CFG);
++    msdc_delay(10);
++    msdc_writel(0, MSDC_CFG);
++    msdc_delay(10);
++
++    /* 3. Set SD/MMC mode (not SPI), enable clock, 400kHz init speed */
++    msdc_writel((MSDC_CKDIV_400KHZ << MSDC_CFG_CKDIV_SHIFT), MSDC_CFG);
++    msdc_delay(100);
++
++    /* 4. Enable bus power — set SDC configuration */
++    msdc_writel(0x00030000, MSDC_SDC_CFG); /* 4-bit bus, timeout = 0 */
++
++    /* 5. CMD0 — GO_IDLE */
++    msdc_send_cmd(SD_CMD0, 0, 0, NULL);
++    msdc_delay(1000);
++
++    /* 6. CMD8 — SEND_IF_COND (check for SDHC) */
++    /* arg: VHS=1 (2.7-3.6V), check pattern 0xAA */
++    if (msdc_send_cmd(SD_CMD8, 0x000001AA, 1, &resp) == 0 &&
++        (resp & 0xFF) == 0xAA) {
++        sd_sdhc = 1;
++        uart_puts("MSDC: SDHC detected\r\n");
++    } else {
++        sd_sdhc = 0;
++    }
++
++    /* 7. ACMD41 loop — wait for card ready */
++    timeout = 1000;
++    do {
++        /* CMD55 — APP_CMD */
++        msdc_send_cmd(SD_CMD55, 0, 1, NULL);
++        /* ACMD41 — SD_SEND_OP_COND */
++        ocr = sd_sdhc ? 0x40FF8000 : 0x00FF8000;
++        if (msdc_send_cmd(SD_ACMD41, ocr, 3, &resp))
++            continue;
++        if (resp & (1 << 31)) { /* Card power up status bit */
++            sd_sdhc = (resp & (1 << 30)) ? 1 : 0;
++            break;
++        }
++        msdc_delay(1000);
++    } while (--timeout);
++
++    if (!timeout) {
++        uart_puts("MSDC: card init timeout\r\n");
++        return -1;
++    }
++
++    /* 8. CMD2 — ALL_SEND_CID */
++    msdc_send_cmd(SD_CMD2, 0, 2, NULL);
++
++    /* 9. CMD3 — SEND_RELATIVE_ADDR */
++    msdc_send_cmd(SD_CMD3, 0, 1, &resp);
++    sd_rca = resp & 0xFFFF0000;
++
++    /* 10. CMD7 — SELECT_CARD */
++    msdc_send_cmd(SD_CMD7, sd_rca, 1, NULL);
++
++    /* 11. Ramp up clock to ~13MHz for data transfer */
++    msdc_set_clock(MSDC_CKDIV_25MHZ);
++
++    uart_puts("MSDC: SD card ready\r\n");
++    return 0;
++}
++
++/* ── Public: read sectors from SD card (PIO mode) ───────────────────────── */
++int mt6261_msdc_read(void *dst, unsigned int lba, unsigned int count)
++{
++    unsigned char *buf = (unsigned char *)dst;
++    unsigned int i, j;
++
++    for (i = 0; i < count; i++) {
++        unsigned int addr = sd_sdhc ? (lba + i) : ((lba + i) * 512);
++        unsigned int words = 512 / 4;
++
++        /* Set block length (already 512 for SDHC) */
++        msdc_writel(0x00030200, MSDC_SDC_CFG); /* 512-byte blocks */
++
++        /* Clear FIFO */
++        msdc_writel(UART_FCR_CLRFIFO, MSDC_FIFOCS);
++
++        /* CMD17 — READ_SINGLE_BLOCK */
++        if (msdc_send_cmd(SD_CMD17, addr, 1, NULL))
++            return -1;
++
++        /* Wait for data ready */
++        if (msdc_wait_int(MSDC_INT_XFER_COMPL))
++            return -1;
++
++        /* Read 512 bytes from FIFO */
++        for (j = 0; j < words; j++) {
++            unsigned int val = msdc_readl(MSDC_RXDATA);
++            *buf++ = val & 0xFF;
++            *buf++ = (val >> 8) & 0xFF;
++            *buf++ = (val >> 16) & 0xFF;
++            *buf++ = (val >> 24) & 0xFF;
++        }
++    }
++
++    return 0;
++}
+diff --git a/arch/arm/mt6261/mt6261.h b/arch/arm/mt6261/mt6261.h
+new file mode 100644
+index 0000000..f0c38d8
+--- /dev/null
++++ b/arch/arm/mt6261/mt6261.h
+@@ -0,0 +1,210 @@
++/* arch/arm/mt6261/mt6261.h
++ * MediaTek MT6261 SoC register map
++ * Target: Gradiente Neo Flip 105A (GFP-105A)
++ *
++ * Copyright (C) 2026 OpenPhone Project
++ * SPDX-License-Identifier: GPL-2.0-only
++ *
++ * Sources:
++ *   - MT6261 SDK header leaks
++ *   - WD031 firmware dump analysis (dump_preloader.bin)
++ *   - Community documentation (MTK feature phone wiki)
++ */
++
++#ifndef MT6261_H
++#define MT6261_H
++
++/* ── Memory map ─────────────────────────────────────────────────────────── */
++#define MT6261_NOR_BASE         0x00000000  /* NOR flash, 4MB (MX25L3291)   */
++#define MT6261_NOR_SIZE         0x00400000
++#define MT6261_SRAM_BASE        0x70000000  /* Internal SRAM, 256KB         */
++#define MT6261_SRAM_SIZE        0x00040000
++
++/* GFH-derived load parameters (from WD031 firmware dump) */
++#define GFH_LOAD_ADDR           0x70006000  /* GFH load_addr field          */
++#define GFH_JUMP_OFF            0x00000140  /* GFH jump_offset field        */
++#define GFH_ENTRY_POINT         (GFH_LOAD_ADDR + GFH_JUMP_OFF) /* 0x70006140 */
++#define GFH_CONTENT_OFF         0x00000140  /* GFH content_off field        */
++
++/* OpenPhone SRAM layout */
++#define OPENPHONE_STACK_TOP     (MT6261_SRAM_BASE + MT6261_SRAM_SIZE - 4)
++#define OPENBIOS_LOAD_ADDR      (MT6261_SRAM_BASE + 0x10000) /* 0x70010000  */
++#define OPENBIOS_MAX_SIZE       0x20000     /* 128KB max for OpenBIOS image  */
++
++/* SD card boot parameters */
++#define OPENBIOS_SD_SECTOR      1           /* LBA sector of OpenBIOS image  */
++#define OPENBIOS_SD_SECTORS     256         /* 128KB = 256 * 512             */
++
++/* OpenPhone version string */
++#define OPENPHONE_VERSION       "0.1"
++
++/* ── Peripheral base addresses ──────────────────────────────────────────── */
++#define MT6261_CONFG_BASE       0x80000000  /* Config / clock controller    */
++#define MT6261_GPIO_BASE        0x80020000  /* GPIO                         */
++#define MT6261_UART0_BASE       0x80030000  /* UART0 (debug/console)        */
++#define MT6261_UART1_BASE       0x80040000  /* UART1                        */
++#define MT6261_MSDC_BASE        0x80050000  /* MSDC (SD/MMC controller)     */
++#define MT6261_I2C_BASE         0x80060000  /* I2C                          */
++#define MT6261_SPI_BASE         0x80080000  /* SPI                          */
++#define MT6261_RTC_BASE         0x80090000  /* RTC                          */
++#define MT6261_PWM_BASE         0x800A0000  /* PWM                          */
++#define MT6261_USB_BASE         0x80060000  /* USB (MUSB-compatible)        */
++#define MT6261_LCD_BASE         0x800B0000  /* LCD controller               */
++
++/* ── Clock / Power-Down controller ─────────────────────────────────────── */
++#define MT6261_PDN_CON0         (MT6261_CONFG_BASE + 0x0300)
++#define MT6261_PDN_CON1         (MT6261_CONFG_BASE + 0x0304)
++#define MT6261_PDN_CON2         (MT6261_CONFG_BASE + 0x0308)
++#define MT6261_PDN_SET0         (MT6261_CONFG_BASE + 0x0310)
++#define MT6261_PDN_CLR0         (MT6261_CONFG_BASE + 0x0320) /* write 1 to enable clk */
++
++/* PDN_CON0 clock gate bits (0 = clock on, 1 = clock off) */
++#define PDN0_MSDC               (1 << 18)
++#define PDN0_USB                (1 << 20)
++#define PDN0_UART0              (1 << 24)
++#define PDN0_UART1              (1 << 25)
++
++/* ── UART registers (16550-compatible) ──────────────────────────────────── */
++/* Offset from UART base. DLAB=0 */
++#define UART_RBR                0x00    /* Receive buffer register (R)      */
++#define UART_THR                0x00    /* Transmit holding register (W)    */
++#define UART_IER                0x04    /* Interrupt enable register        */
++/* DLAB=1 */
++#define UART_DLL                0x00    /* Baud divisor latch low           */
++#define UART_DLH                0x04    /* Baud divisor latch high          */
++/* Always */
++#define UART_IIR                0x08    /* Interrupt ID register (R)        */
++#define UART_FCR                0x08    /* FIFO control register (W)        */
++#define UART_LCR                0x0C    /* Line control register            */
++#define UART_MCR                0x10    /* Modem control register           */
++#define UART_LSR                0x14    /* Line status register             */
++#define UART_MSR                0x18    /* Modem status register            */
++#define UART_SCR                0x1C    /* Scratch register                 */
++/* MTK-specific UART registers */
++#define UART_AUTOBAUD_EN        0x20    /* Auto-baud enable                 */
++#define UART_HIGHSPEED          0x24    /* High-speed mode                  */
++#define UART_FRACDIV_L          0x54    /* Fractional divider low           */
++#define UART_FRACDIV_M          0x58    /* Fractional divider high          */
++
++/* UART_LSR bits */
++#define UART_LSR_DR             (1 << 0)    /* Data ready                   */
++#define UART_LSR_THRE           (1 << 5)    /* TX holding register empty    */
++#define UART_LSR_TEMT           (1 << 6)    /* Transmitter empty            */
++
++/* UART_LCR values */
++#define UART_LCR_8N1            0x03        /* 8 bits, no parity, 1 stop    */
++#define UART_LCR_DLAB           0x80        /* Divisor latch access bit     */
++
++/* UART_FCR values */
++#define UART_FCR_ENABLE         0x01
++#define UART_FCR_CLRFIFO        0x06        /* Clear TX+RX FIFOs            */
++#define UART_FCR_INIT           (UART_FCR_ENABLE | UART_FCR_CLRFIFO)
++
++/*
++ * Baud rate divisor for 115200 bps
++ * MT6261 UART clock source = 26 MHz crystal
++ * Normal mode: divisor = 26000000 / (16 * 115200) = 14.1 → 14
++ * High-speed mode (HIGHSPEED=3): divisor = 26000000 / (256 * 115200) → use fractional
++ * Using normal mode divisor 14: actual = 26000000 / (16*14) = 116071 bps (~0.7% error)
++ */
++#define UART0_BAUD_DLL          14
++#define UART0_BAUD_DLH          0
++#define UART0_HIGHSPEED         0           /* Normal mode                  */
++
++/* ── MSDC (SD/MMC controller) registers ────────────────────────────────── */
++/* Offset from MT6261_MSDC_BASE */
++#define MSDC_CFG                0x00    /* MSDC global configuration        */
++#define MSDC_IOCON              0x04    /* MSDC IO control                  */
++#define MSDC_PS                 0x08    /* MSDC pin state                   */
++#define MSDC_INT                0x0C    /* MSDC interrupt status            */
++#define MSDC_INTEN              0x10    /* MSDC interrupt enable            */
++#define MSDC_FIFOCS             0x14    /* MSDC FIFO control/status         */
++#define MSDC_TXDATA             0x18    /* MSDC TX data port                */
++#define MSDC_RXDATA             0x1C    /* MSDC RX data port                */
++#define MSDC_SDC_CFG            0x30    /* SD card configuration            */
++#define MSDC_SDC_CMD            0x34    /* SD command register              */
++#define MSDC_SDC_ARG            0x38    /* SD command argument              */
++#define MSDC_SDC_STS            0x3C    /* SD status register               */
++#define MSDC_SDC_RESP0          0x40    /* SD response 0                    */
++#define MSDC_SDC_RESP1          0x44    /* SD response 1                    */
++#define MSDC_SDC_RESP2          0x48    /* SD response 2                    */
++#define MSDC_SDC_RESP3          0x4C    /* SD response 3                    */
++#define MSDC_SDC_BLK_NUM        0x50    /* SD block number                  */
++#define MSDC_SDC_CSTS           0x58    /* SD card status                   */
++#define MSDC_SDC_CSTS_EN        0x5C    /* SD card status enable            */
++#define MSDC_SDC_DCRC_STS       0x60    /* SD data CRC status               */
++#define MSDC_DMA_SA             0x90    /* DMA source address               */
++#define MSDC_DMA_CA             0x94    /* DMA current address              */
++#define MSDC_DMA_CTRL           0x98    /* DMA control                      */
++#define MSDC_DMA_CFG            0x9C    /* DMA configuration                */
++#define MSDC_DBG_SEL            0xB0    /* Debug select                     */
++#define MSDC_DBG_OUT            0xB4    /* Debug output                     */
++#define MSDC_PATCH_BIT          0xB4    /* Patch bits                       */
++#define MSDC_PATCH_BIT1         0xB8    /* Patch bits 1                     */
++#define MSDC_PAD_CTL0           0xD0    /* Pad control 0 (CLK)              */
++#define MSDC_PAD_CTL1           0xD4    /* Pad control 1 (CMD)              */
++#define MSDC_PAD_CTL2           0xD8    /* Pad control 2 (DAT)              */
++#define MSDC_DAT_RDDLY0         0xF0    /* Data read delay 0                */
++
++/* MSDC_CFG bits */
++#define MSDC_CFG_MODE           (1 << 0)    /* 0=SD/MMC 1=SPI               */
++#define MSDC_CFG_CKPDN          (1 << 1)    /* Clock power down             */
++#define MSDC_CFG_RST            (1 << 2)    /* Software reset               */
++#define MSDC_CFG_PIO            (1 << 3)    /* PIO mode                     */
++#define MSDC_CFG_CKDRVEN        (1 << 4)    /* Clock drive enable           */
++#define MSDC_CFG_BV18SDT        (1 << 5)    /* 1.8V signal detect           */
++#define MSDC_CFG_BV18PSS        (1 << 6)    /* 1.8V power switch status     */
++#define MSDC_CFG_CKSTB          (1 << 7)    /* Clock stable                 */
++#define MSDC_CFG_CKDIV_SHIFT    8
++#define MSDC_CFG_CKDIV_MASK     (0xFF << MSDC_CFG_CKDIV_SHIFT)
++#define MSDC_CFG_CKMOD_SHIFT    16
++#define MSDC_CFG_CKMOD_MASK     (0x3 << MSDC_CFG_CKMOD_SHIFT)
++
++/* MSDC_SDC_CMD bits */
++#define SDC_CMD_CMD_SHIFT       0
++#define SDC_CMD_CMD_MASK        0x3F
++#define SDC_CMD_BLK_LEN_SHIFT   16
++#define SDC_CMD_STOP            (1 << 14)
++#define SDC_CMD_WRITE           (1 << 13)
++#define SDC_CMD_DTYPE_SHIFT     11          /* 0=no data, 1=single, 2=multi */
++#define SDC_CMD_RSPTYP_SHIFT    7           /* 0=none 1=R1 2=R2 3=R3 4=R1b  */
++#define SDC_CMD_INSWKUP         (1 << 6)
++
++/* MSDC_INT bits */
++#define MSDC_INT_CMDRDY         (1 << 8)    /* Command ready                */
++#define MSDC_INT_CMDTO          (1 << 9)    /* Command timeout              */
++#define MSDC_INT_RSPCRCERR      (1 << 10)   /* Response CRC error           */
++#define MSDC_INT_XFER_COMPL     (1 << 12)   /* Transfer complete            */
++#define MSDC_INT_DATTMO         (1 << 14)   /* Data timeout                 */
++#define MSDC_INT_DATCRCERR      (1 << 15)   /* Data CRC error               */
++#define MSDC_INT_DMA_BDCSERR    (1 << 16)   /* DMA descriptor checksum err  */
++#define MSDC_INT_DMA_GPDCSERR   (1 << 17)   /* DMA GPD checksum error       */
++#define MSDC_INT_DMA_PROTECT    (1 << 18)   /* DMA address protection err   */
++
++/* MSDC_SDC_STS bits */
++#define SDC_STS_SDCBUSY         (1 << 0)    /* SDC busy                     */
++#define SDC_STS_CMDBUSY         (1 << 1)    /* Command busy                 */
++#define SDC_STS_DLY_CNTR        (1 << 12)   /* Delay counter                */
++
++/* MSDC clock divider for 400kHz init speed
++ * Input clock = 26MHz, CKMOD=0 (div mode)
++ * Divider = 26000000 / (2 * 400000) - 1 = 31.5 → 32
++ */
++#define MSDC_CKDIV_400KHZ       32
++/* Divider for 25MHz data transfer speed */
++#define MSDC_CKDIV_25MHZ        0           /* 26MHz / 2*1 = 13MHz (safe)   */
++
++/* SD card commands */
++#define SD_CMD0                 0           /* GO_IDLE_STATE                */
++#define SD_CMD2                 2           /* ALL_SEND_CID                 */
++#define SD_CMD3                 3           /* SEND_RELATIVE_ADDR           */
++#define SD_CMD7                 7           /* SELECT_CARD                  */
++#define SD_CMD8                 8           /* SEND_IF_COND                 */
++#define SD_CMD9                 9           /* SEND_CSD                     */
++#define SD_CMD12                12          /* STOP_TRANSMISSION            */
++#define SD_CMD17                17          /* READ_SINGLE_BLOCK            */
++#define SD_CMD18                18          /* READ_MULTIPLE_BLOCK          */
++#define SD_ACMD41               41          /* SD_SEND_OP_COND              */
++#define SD_CMD55                55          /* APP_CMD                      */
++
++#endif /* MT6261_H */
+diff --git a/arch/arm/mt6261/openbios.c b/arch/arm/mt6261/openbios.c
+new file mode 100644
+index 0000000..a01aa0a
+--- /dev/null
++++ b/arch/arm/mt6261/openbios.c
+@@ -0,0 +1,126 @@
++/* arch/arm/mt6261/openbios.c
++ * OpenPhone — OpenBIOS main entry for MT6261/GFP-105A
++ *
++ * Copyright (C) 2026 OpenPhone Project
++ * SPDX-License-Identifier: GPL-2.0-only
++ *
++ * This is the C entry point called from entry.S after UART and MSDC
++ * are initialised. It sets up the OpenBIOS/OpenFirmware environment
++ * and drops into the interactive Forth shell over UART0.
++ */
++
++#include "config.h"
++#include "libopenbios/openbios.h"
++#include "libopenbios/bindings.h"
++#include "libopenbios/console.h"
++#include "libopenbios/sys_info.h"
++#include "libopenbios/ofmem.h"
++#include "drivers/drivers.h"
++#include "kernel/kernel.h"
++#include "mt6261.h"
++
++/* Forward declarations */
++void mt6261_uart_init(void);
++void mt6261_devices_init(void);
++
++/* ── System info ────────────────────────────────────────────────────────── */
++
++static struct sys_info mt6261_sys_info;
++
++static void collect_sys_info(struct sys_info *si)
++{
++    si->membase    = MT6261_SRAM_BASE;
++    si->memsize    = MT6261_SRAM_SIZE;
++    si->cpu_hz     = 104000000; /* 104 MHz */
++    si->bus_hz     = 26000000;  /* 26 MHz crystal */
++    si->baudrate   = 115200;
++}
++
++/* ── Device tree setup ──────────────────────────────────────────────────── */
++
++static void mt6261_build_device_tree(void)
++{
++    phandle_t chosen, uart, msdc, memory;
++
++    /* /chosen */
++    chosen = find_dev("/chosen");
++    if (!chosen)
++        chosen = new_property(find_dev("/"), "chosen", NULL, 0);
++
++    /* /memory */
++    memory = find_dev("/memory");
++    if (!memory) {
++        memory = new_device("memory", "memory", find_dev("/"));
++        /* reg = <base size> */
++        unsigned int mem_reg[2] = {
++            MT6261_SRAM_BASE,
++            MT6261_SRAM_SIZE,
++        };
++        set_property(memory, "reg", (char *)mem_reg, sizeof(mem_reg));
++    }
++
++    /* /uart@80030000 */
++    uart = new_device("uart", "ns16550", find_dev("/"));
++    {
++        unsigned int reg = MT6261_UART0_BASE;
++        set_property(uart, "reg",           (char *)&reg, 4);
++        set_property(uart, "compatible",    "ns16550a", 9);
++        unsigned int clk = 26000000;
++        set_property(uart, "clock-frequency", (char *)&clk, 4);
++        unsigned int baud = 115200;
++        set_property(uart, "current-speed",   (char *)&baud, 4);
++        set_property(chosen, "stdin",  "uart", 5);
++        set_property(chosen, "stdout", "uart", 5);
++    }
++
++    /* /msdc@80050000 */
++    msdc = new_device("msdc", "mtk,mt6261-msdc", find_dev("/"));
++    {
++        unsigned int reg = MT6261_MSDC_BASE;
++        set_property(msdc, "reg",        (char *)&reg, 4);
++        set_property(msdc, "compatible", "mtk,mt6261-msdc", 17);
++    }
++}
++
++/* ── OpenBIOS arch hooks ─────────────────────────────────────────────────── */
++
++void arch_init(void)
++{
++    collect_sys_info(&mt6261_sys_info);
++    ofmem_init();
++    mt6261_build_device_tree();
++}
++
++void arch_of_init(void)
++{
++    /* Called after Forth kernel is up */
++    mt6261_devices_init();
++}
++
++/* ── C entry point ──────────────────────────────────────────────────────── */
++
++void openphone_main(void)
++{
++    /* UART is already up from entry.S — use it until USB is ready */
++    uart_puts("\r\nOpenPhone OpenBIOS\r\n");
++    uart_puts("GFP-105A / MT6261 / WD031\r\n\r\n");
++
++    /* Auto-detect console: USB CDC ACM preferred, UART fallback */
++    extern void console_autodetect(void);
++    console_autodetect();
++
++    /* Initialise OpenBIOS core */
++    collect_sys_info(&mt6261_sys_info);
++    openbios_init();
++
++    /* Build device tree */
++    mt6261_build_device_tree();
++
++    /* Hand off to OpenFirmware Forth interpreter */
++    openbios();
++
++    /* Should never return */
++    uart_puts("\r\n*** OpenBIOS returned ***\r\n");
++    for (;;)
++        ;
++}
+diff --git a/arch/arm/mt6261/pack_gfh.py b/arch/arm/mt6261/pack_gfh.py
+new file mode 100644
+index 0000000..4c80409
+--- /dev/null
++++ b/arch/arm/mt6261/pack_gfh.py
+@@ -0,0 +1,121 @@
++#!/usr/bin/env python3
++"""
++pack_gfh.py - Patch OEM GFH header into OpenPhone Stage 1 binary
++Part of the OpenBIOS ARM/MT6261 port for GFP-105A
++
++Usage:
++    python3 pack_gfh.py stage1.bin dump_preloader.bin output.bin
++
++    stage1.bin          Built Stage 1 flat binary (no GFH)
++    dump_preloader.bin  OEM preloader from firmware dump
++                        (must start with 4d4d4d01 GFH magic)
++    output.bin          Output binary ready to flash at NOR 0x000000
++
++The GFH (General Flash Header) occupies the first 0x60 bytes of the
++NOR preloader slot. The BROM validates it before loading. We preserve
++it verbatim from the OEM firmware and patch only file_len to match
++our new Stage 1 size.
++
++GFH field layout (little-endian):
++  0x00  magic       4B   4d4d4d01
++  0x04  version     1B
++  0x05  hdr_size    2B   (LE)
++  0x07  file_type   2B   (LE)
++  0x09  flash_dev   1B
++  0x0A  sig_type    1B   0 = unsigned
++  0x0C  load_addr   4B   (LE)  0x70006000 for GFP-105A
++  0x10  file_len    4B   (LE)  ← patched
++  0x14  max_size    4B   (LE)
++  0x18  content_off 4B   (LE)  0x00000140
++  0x1C  sig_len     4B   (LE)
++  0x20  jump_off    4B   (LE)  0x00000140
++"""
++
++import sys
++import struct
++
++GFH_MAGIC    = bytes([0x4D, 0x4D, 0x4D, 0x01])
++GFH_SIZE     = 0x60
++OFF_FILE_LEN = 0x10
++# GFH is at file offset 0x800 in full dump, or offset 0 in preloader extract
++# This script accepts a preloader extract that starts with the GFH magic.
++
++
++def find_gfh(data):
++    """Return offset of first GFH block whose load_addr looks like SRAM."""
++    off = 0
++    while True:
++        idx = data.find(GFH_MAGIC, off)
++        if idx < 0:
++            return None
++        load_addr = struct.unpack_from('<I', data, idx + 0x0C)[0]
++        # Real preloader GFH has load_addr in SRAM range 0x70000000-0x70FFFFFF
++        if 0x70000000 <= load_addr <= 0x70FFFFFF:
++            return idx
++        off = idx + 4
++
++
++def main():
++    if len(sys.argv) != 4:
++        print(f"Usage: {sys.argv[0]} stage1.bin dump_preloader.bin output.bin")
++        sys.exit(1)
++
++    stage1_path = sys.argv[1]
++    dump_path   = sys.argv[2]
++    out_path    = sys.argv[3]
++
++    print("=" * 52)
++    print("  OpenPhone GFH Patcher")
++    print("  GFP-105A / MT6261 (WD031 SS V00)")
++    print("=" * 52)
++
++    with open(stage1_path, 'rb') as f:
++        stage1 = f.read()
++    print(f"\n  Stage 1: {len(stage1)} bytes  ({stage1_path})")
++
++    with open(dump_path, 'rb') as f:
++        dump = f.read()
++    print(f"  Dump:    {len(dump)} bytes  ({dump_path})")
++
++    # Find the real GFH in the dump
++    gfh_off = find_gfh(dump)
++    if gfh_off is None:
++        print("\n  [ERROR] No valid GFH found in dump file.")
++        print("  Expected GFH magic 4d4d4d01 with SRAM load_addr.")
++        sys.exit(1)
++
++    gfh_bytes = bytearray(dump[gfh_off:gfh_off + GFH_SIZE])
++    load_addr   = struct.unpack_from('<I', gfh_bytes, 0x0C)[0]
++    content_off = struct.unpack_from('<I', gfh_bytes, 0x18)[0]
++    jump_off    = struct.unpack_from('<I', gfh_bytes, 0x20)[0]
++    sig_type    = gfh_bytes[0x0A]
++
++    print(f"\n  GFH found at dump offset {gfh_off:#08x}")
++    print(f"  load_addr:   {load_addr:#010x}")
++    print(f"  content_off: {content_off:#010x}")
++    print(f"  jump_off:    {jump_off:#010x}")
++    print(f"  sig_type:    {sig_type:#04x}  {'(unsigned ✓)' if sig_type == 0 else '(SIGNED!)'}")
++    print(f"  entry_point: {load_addr + jump_off:#010x}")
++
++    if sig_type != 0:
++        print("\n  [WARN] sig_type != 0 — BROM may reject unsigned images.")
++        print("         If boot fails, the MT6261 on this board may enforce")
++        print("         signature checking. Check with KCOLO method first.")
++
++    # Build output: [GFH][stage1 code]
++    new_len = GFH_SIZE + len(stage1)
++    struct.pack_into('<I', gfh_bytes, OFF_FILE_LEN, new_len)
++    output = bytes(gfh_bytes) + stage1
++
++    with open(out_path, 'wb') as f:
++        f.write(output)
++
++    print(f"\n  Output:  {out_path}  ({len(output)} bytes)")
++    print(f"  file_len patched to {new_len:#010x}")
++    print(f"\n  Flash at NOR offset 0x000000:")
++    print(f"    SP Flash Tool → Download → addr 0x00000000 → {out_path}")
++    print("=" * 52)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/arch/arm/mt6261/uart.c b/arch/arm/mt6261/uart.c
+new file mode 100644
+index 0000000..bac3fbd
+--- /dev/null
++++ b/arch/arm/mt6261/uart.c
+@@ -0,0 +1,170 @@
++/* arch/arm/mt6261/uart.c
++ * MT6261 UART0 driver — 16550-compatible, 115200 8N1
++ * Used as primary console for OpenPhone/OpenBIOS
++ *
++ * Copyright (C) 2026 OpenPhone Project
++ * SPDX-License-Identifier: GPL-2.0-only
++ */
++
++#include "config.h"
++#include "mt6261.h"
++#include "libopenbios/console.h"
++
++/* Memory-mapped register access */
++#define REG32(addr)     (*(volatile unsigned int *)(addr))
++#define REG8(addr)      (*(volatile unsigned char *)(addr))
++
++/* ── Low-level register accessors ──────────────────────────────────────── */
++
++static inline void uart_writel(unsigned int val, unsigned int off)
++{
++    REG32(MT6261_UART0_BASE + off) = val;
++}
++
++static inline unsigned int uart_readl(unsigned int off)
++{
++    return REG32(MT6261_UART0_BASE + off);
++}
++
++/* ── Public API ─────────────────────────────────────────────────────────── */
++
++void mt6261_uart_init(void)
++{
++    /* 1. Enable UART0 clock — clear power-down bit in PDN_CLR0 */
++    REG32(MT6261_PDN_CLR0) = PDN0_UART0;
++
++    /* 2. Disable all interrupts */
++    uart_writel(0, UART_IER);
++
++    /* 3. Assert DLAB to access baud divisor */
++    uart_writel(UART_LCR_DLAB, UART_LCR);
++
++    /* 4. Set baud rate divisor for 115200 */
++    uart_writel(UART0_BAUD_DLL, UART_DLL);
++    uart_writel(UART0_BAUD_DLH, UART_DLH);
++
++    /* 5. Set high-speed mode register (0 = normal mode) */
++    uart_writel(UART0_HIGHSPEED, UART_HIGHSPEED);
++
++    /* 6. Clear DLAB, set 8N1 */
++    uart_writel(UART_LCR_8N1, UART_LCR);
++
++    /* 7. Enable and flush FIFOs */
++    uart_writel(UART_FCR_INIT, UART_FCR);
++
++    /* 8. Assert RTS and DTR */
++    uart_writel(0x03, UART_MCR);
++}
++
++void uart_putc(int c)
++{
++    /* Wait for TX holding register empty */
++    while (!(uart_readl(UART_LSR) & UART_LSR_THRE))
++        ;
++    uart_writel(c & 0xFF, UART_THR);
++}
++
++void uart_puts(const char *s)
++{
++    while (*s) {
++        if (*s == '\n')
++            uart_putc('\r');
++        uart_putc(*s++);
++    }
++}
++
++int uart_getc(void)
++{
++    while (!(uart_readl(UART_LSR) & UART_LSR_DR))
++        ;
++    return uart_readl(UART_RBR) & 0xFF;
++}
++
++int uart_tstc(void)
++{
++    return (uart_readl(UART_LSR) & UART_LSR_DR) ? 1 : 0;
++}
++
++/* Print a 32-bit hex value — useful for debugging without printf */
++void uart_puthex(unsigned int v)
++{
++    int i;
++    uart_puts("0x");
++    for (i = 28; i >= 0; i -= 4) {
++        int nibble = (v >> i) & 0xF;
++        uart_putc(nibble < 10 ? '0' + nibble : 'A' + nibble - 10);
++    }
++}
++
++/* ── OpenBIOS console ops — dual UART + USB CDC ──────────────────────────
++ *
++ * On boot, Stage 1 tries USB first (waits 2 seconds for host to
++ * configure). If no host connects, falls back to UART0.
++ * Once a console is chosen it stays for the session.
++ */
++
++#ifdef CONFIG_DEBUG_CONSOLE
++
++#include "usb_cdc.h"
++
++typedef enum {
++    CONSOLE_UART = 0,
++    CONSOLE_USB  = 1,
++    CONSOLE_AUTO = 2,   /* not yet decided                                  */
++} console_mode_t;
++
++static console_mode_t console_mode = CONSOLE_AUTO;
++
++void console_autodetect(void)
++{
++    unsigned int i;
++
++    mt6261_usb_init();
++    uart_puts("Console: waiting for USB host (2s)...\r\n");
++
++    /* Wait up to 2 seconds for USB SET_CONFIGURATION */
++    for (i = 0; i < 200000; i++) {
++        mt6261_usb_irq();
++        if (usb_cdc_configured()) {
++            console_mode = CONSOLE_USB;
++            uart_puts("Console: USB CDC ACM\r\n");
++            return;
++        }
++        /* Rough 10µs delay */
++        volatile int d = 1000; while (d--) ;
++    }
++
++    console_mode = CONSOLE_UART;
++    uart_puts("Console: UART0 115200 8N1\r\n");
++}
++
++static int arch_putchar(int c)
++{
++    if (console_mode == CONSOLE_USB)
++        usb_cdc_putc(c);
++    else
++        uart_putc(c);
++    return c;
++}
++
++static int arch_availchar(void)
++{
++    if (console_mode == CONSOLE_USB)
++        return usb_cdc_tstc();
++    return uart_tstc();
++}
++
++static int arch_getchar(void)
++{
++    if (console_mode == CONSOLE_USB)
++        return usb_cdc_getc();
++    return uart_getc();
++}
++
++struct _console_ops arch_console_ops = {
++    .putchar   = arch_putchar,
++    .availchar = arch_availchar,
++    .getchar   = arch_getchar,
++};
++
++#endif /* CONFIG_DEBUG_CONSOLE */
+diff --git a/arch/arm/mt6261/usb_cdc.c b/arch/arm/mt6261/usb_cdc.c
+new file mode 100644
+index 0000000..a1d3e1e
+--- /dev/null
++++ b/arch/arm/mt6261/usb_cdc.c
+@@ -0,0 +1,596 @@
++/* arch/arm/mt6261/usb_cdc.c
++ * OpenPhone — MT6261 USB CDC ACM virtual serial port driver
++ *
++ * Copyright (C) 2026 OpenPhone Project
++ * SPDX-License-Identifier: GPL-2.0-only
++ *
++ * Implements a minimal USB CDC ACM device so the host sees
++ * /dev/ttyACM0 (Linux) or COMx (Windows) over the phone's
++ * micro-USB cable. No extra hardware needed.
++ *
++ * MT6261 USB controller is a Mentor Graphics MUSB-compatible
++ * peripheral engine. Register base: 0x80070000 (estimated —
++ * verify against dump_preloader.bin once disassembler is available).
++ *
++ * USB descriptor layout:
++ *   Device descriptor
++ *   Configuration descriptor
++ *     Interface 0 — CDC Communication (interrupt EP)
++ *     Interface 1 — CDC Data (bulk IN + bulk OUT)
++ *
++ * EP assignment:
++ *   EP0   Control
++ *   EP1   Bulk IN  (device→host, TX data)
++ *   EP2   Bulk OUT (host→device, RX data)
++ *   EP3   Interrupt IN (CDC notifications, unused but required)
++ */
++
++#include "config.h"
++#include "mt6261.h"
++#include "usb_cdc.h"
++
++#define REG8(a)     (*(volatile unsigned char *)(a))
++#define REG16(a)    (*(volatile unsigned short *)(a))
++#define REG32(a)    (*(volatile unsigned int *)(a))
++
++/* ── MUSB register map (offsets from MT6261_USB_BASE) ───────────────────── */
++
++/* Common registers */
++#define MUSB_FADDR          0x00    /* Function address                     */
++#define MUSB_POWER          0x01    /* Power management                     */
++#define MUSB_INTRTX         0x02    /* TX interrupt status (EP0..EP15)      */
++#define MUSB_INTRRX         0x04    /* RX interrupt status                  */
++#define MUSB_INTRTXE        0x06    /* TX interrupt enable                  */
++#define MUSB_INTRRXE        0x08    /* RX interrupt enable                  */
++#define MUSB_INTRUSB        0x0A    /* USB interrupt status                 */
++#define MUSB_INTRUSBE       0x0B    /* USB interrupt enable                 */
++#define MUSB_FRAME          0x0C    /* Frame number                         */
++#define MUSB_INDEX          0x0E    /* Endpoint index register              */
++#define MUSB_TESTMODE       0x0F    /* Test mode                            */
++
++/* Indexed endpoint registers (select EP with MUSB_INDEX first) */
++#define MUSB_TXMAXP         0x10    /* TX max packet size                   */
++#define MUSB_CSR0           0x12    /* EP0 control/status (index=0)         */
++#define MUSB_TXCSR          0x12    /* TX control/status (index>0)          */
++#define MUSB_RXMAXP         0x14    /* RX max packet size                   */
++#define MUSB_RXCSR          0x16    /* RX control/status                    */
++#define MUSB_COUNT0         0x18    /* EP0 RX byte count                    */
++#define MUSB_RXCOUNT        0x18    /* RX byte count                        */
++#define MUSB_FIFOSIZE       0x1F    /* FIFO size                            */
++
++/* FIFO data registers (one per endpoint) */
++#define MUSB_FIFO(ep)       (0x20 + (ep) * 4)
++
++/* MUSB_POWER bits */
++#define POWER_SOFTCONN      (1 << 6)    /* Connect to bus                   */
++#define POWER_HSENAB        (1 << 5)    /* High speed enable                */
++#define POWER_HSMODE        (1 << 4)    /* High speed mode active           */
++#define POWER_RESET         (1 << 3)    /* Bus reset                        */
++#define POWER_RESUME        (1 << 2)    /* Resume signalling                */
++#define POWER_SUSPENDM      (1 << 1)    /* Suspend mode                     */
++#define POWER_ENSUSPM       (1 << 0)    /* Enable suspend mode              */
++
++/* MUSB_CSR0 bits */
++#define CSR0_FLUSHFIFO      (1 << 8)
++#define CSR0_TXPKTRDY       (1 << 1)    /* TX packet ready                  */
++#define CSR0_RXPKTRDY       (1 << 0)    /* RX packet ready                  */
++#define CSR0_DATAEND        (1 << 3)    /* Data end (status stage)          */
++#define CSR0_SETUPEND       (1 << 4)    /* Setup end                        */
++#define CSR0_SENDSTALL      (1 << 5)    /* Send stall                       */
++#define CSR0_SVDRXPKTRDY    (1 << 6)    /* Served RX packet ready           */
++#define CSR0_SVDSETUPEND    (1 << 7)    /* Served setup end                 */
++
++/* MUSB_TXCSR bits */
++#define TXCSR_TXPKTRDY      (1 << 0)
++#define TXCSR_FIFONOTEMPTY  (1 << 1)
++#define TXCSR_FLUSHFIFO     (1 << 3)
++#define TXCSR_CLRDATATOG    (1 << 6)
++
++/* MUSB_RXCSR bits */
++#define RXCSR_RXPKTRDY      (1 << 0)
++#define RXCSR_FLUSHFIFO     (1 << 4)
++#define RXCSR_CLRDATATOG    (1 << 7)
++
++/* MUSB_INTRUSB bits */
++#define INTRUSB_RESET       (1 << 2)
++#define INTRUSB_SOF         (1 << 3)
++#define INTRUSB_CONN        (1 << 4)
++#define INTRUSB_DISCON      (1 << 5)
++#define INTRUSB_SESSREQ     (1 << 6)
++#define INTRUSB_VBUSERR     (1 << 7)
++
++/* MT6261-specific USB registers (beyond standard MUSB) */
++#define MT6261_USB_SWRST    (MT6261_USB_BASE + 0x74)  /* Software reset     */
++#define MT6261_USB_PHYCTRL  (MT6261_USB_BASE + 0xF4)  /* PHY control        */
++#define MT6261_USB_PHYCTRL6 (MT6261_USB_BASE + 0x124) /* PHY control 6      */
++
++/* EP numbers */
++#define EP_CTRL         0
++#define EP_BULK_IN      1   /* Device → Host (TX to host)                   */
++#define EP_BULK_OUT     2   /* Host → Device (RX from host)                 */
++#define EP_INTR_IN      3   /* Interrupt IN (CDC notifications)             */
++
++#define EP0_SIZE        64
++#define BULK_EP_SIZE    64
++#define INTR_EP_SIZE    16
++
++/* ── USB descriptor tables ──────────────────────────────────────────────── */
++
++/* CDC class codes */
++#define USB_CLASS_CDC           0x02
++#define USB_CLASS_CDC_DATA      0x0A
++#define USB_SUBCLASS_ACM        0x02
++#define USB_PROTO_AT_V25TER     0x01
++#define USB_PROTO_NONE          0x00
++
++/* Descriptor types */
++#define USB_DT_DEVICE           0x01
++#define USB_DT_CONFIG           0x02
++#define USB_DT_STRING           0x03
++#define USB_DT_INTERFACE        0x04
++#define USB_DT_ENDPOINT         0x05
++#define USB_DT_CS_INTERFACE     0x24    /* CDC class-specific               */
++
++/* CDC functional descriptor subtypes */
++#define CDC_HEADER_FD           0x00
++#define CDC_CALL_MGMT_FD        0x01
++#define CDC_ACM_FD              0x02
++#define CDC_UNION_FD            0x06
++
++/* Request types */
++#define USB_REQ_GET_DESCRIPTOR  0x06
++#define USB_REQ_SET_ADDRESS     0x05
++#define USB_REQ_SET_CONFIG      0x09
++#define USB_REQ_SET_LINE_CODING 0x20    /* CDC ACM                          */
++#define USB_REQ_SET_CTL_STATE   0x22    /* CDC ACM                          */
++#define USB_REQ_GET_LINE_CODING 0x21    /* CDC ACM                          */
++
++static const unsigned char device_descriptor[] = {
++    18,                     /* bLength                                      */
++    USB_DT_DEVICE,          /* bDescriptorType                              */
++    0x10, 0x01,             /* bcdUSB = 1.1                                 */
++    USB_CLASS_CDC,          /* bDeviceClass                                 */
++    0x00,                   /* bDeviceSubClass                              */
++    0x00,                   /* bDeviceProtocol                              */
++    EP0_SIZE,               /* bMaxPacketSize0                              */
++    0x6D, 0x04,             /* idVendor  = 0x046D (placeholder — Logitech) */
++    0x05, 0x10,             /* idProduct = 0x1005 (placeholder)            */
++    0x00, 0x01,             /* bcdDevice = 1.00                             */
++    0x01,                   /* iManufacturer                                */
++    0x02,                   /* iProduct                                     */
++    0x03,                   /* iSerialNumber                                */
++    0x01,                   /* bNumConfigurations                           */
++};
++
++/* Full configuration descriptor including all CDC interfaces */
++static const unsigned char config_descriptor[] = {
++    /* Configuration descriptor */
++    9,                      /* bLength                                      */
++    USB_DT_CONFIG,          /* bDescriptorType                              */
++    67, 0,                  /* wTotalLength = 67 bytes                      */
++    2,                      /* bNumInterfaces                               */
++    1,                      /* bConfigurationValue                          */
++    0,                      /* iConfiguration                               */
++    0x80,                   /* bmAttributes — bus powered                   */
++    50,                     /* bMaxPower = 100mA                            */
++
++    /* Interface 0 — CDC Communication */
++    9,                      /* bLength                                      */
++    USB_DT_INTERFACE,       /* bDescriptorType                              */
++    0,                      /* bInterfaceNumber                             */
++    0,                      /* bAlternateSetting                            */
++    1,                      /* bNumEndpoints (interrupt IN)                 */
++    USB_CLASS_CDC,          /* bInterfaceClass                              */
++    USB_SUBCLASS_ACM,       /* bInterfaceSubClass                           */
++    USB_PROTO_AT_V25TER,    /* bInterfaceProtocol                           */
++    0,                      /* iInterface                                   */
++
++    /* CDC Header functional descriptor */
++    5,                      /* bLength                                      */
++    USB_DT_CS_INTERFACE,    /* bDescriptorType                              */
++    CDC_HEADER_FD,          /* bDescriptorSubtype                           */
++    0x10, 0x01,             /* bcdCDC = 1.10                                */
++
++    /* CDC Call Management functional descriptor */
++    5,                      /* bLength                                      */
++    USB_DT_CS_INTERFACE,    /* bDescriptorType                              */
++    CDC_CALL_MGMT_FD,       /* bDescriptorSubtype                           */
++    0x00,                   /* bmCapabilities — no call mgmt                */
++    1,                      /* bDataInterface                               */
++
++    /* CDC ACM functional descriptor */
++    4,                      /* bLength                                      */
++    USB_DT_CS_INTERFACE,    /* bDescriptorType                              */
++    CDC_ACM_FD,             /* bDescriptorSubtype                           */
++    0x02,                   /* bmCapabilities — line coding + state         */
++
++    /* CDC Union functional descriptor */
++    5,                      /* bLength                                      */
++    USB_DT_CS_INTERFACE,    /* bDescriptorType                              */
++    CDC_UNION_FD,           /* bDescriptorSubtype                           */
++    0,                      /* bMasterInterface                             */
++    1,                      /* bSlaveInterface                              */
++
++    /* Endpoint 3 — Interrupt IN */
++    7,                      /* bLength                                      */
++    USB_DT_ENDPOINT,        /* bDescriptorType                              */
++    0x80 | EP_INTR_IN,      /* bEndpointAddress — IN                        */
++    0x03,                   /* bmAttributes — interrupt                     */
++    INTR_EP_SIZE, 0,        /* wMaxPacketSize                               */
++    0xFF,                   /* bInterval — 255ms                            */
++
++    /* Interface 1 — CDC Data */
++    9,                      /* bLength                                      */
++    USB_DT_INTERFACE,       /* bDescriptorType                              */
++    1,                      /* bInterfaceNumber                             */
++    0,                      /* bAlternateSetting                            */
++    2,                      /* bNumEndpoints                                */
++    USB_CLASS_CDC_DATA,     /* bInterfaceClass                              */
++    0,                      /* bInterfaceSubClass                           */
++    USB_PROTO_NONE,         /* bInterfaceProtocol                           */
++    0,                      /* iInterface                                   */
++
++    /* Endpoint 1 — Bulk IN */
++    7,                      /* bLength                                      */
++    USB_DT_ENDPOINT,        /* bDescriptorType                              */
++    0x80 | EP_BULK_IN,      /* bEndpointAddress — IN                        */
++    0x02,                   /* bmAttributes — bulk                          */
++    BULK_EP_SIZE, 0,        /* wMaxPacketSize                               */
++    0,                      /* bInterval                                    */
++
++    /* Endpoint 2 — Bulk OUT */
++    7,                      /* bLength                                      */
++    USB_DT_ENDPOINT,        /* bDescriptorType                              */
++    EP_BULK_OUT,            /* bEndpointAddress — OUT                       */
++    0x02,                   /* bmAttributes — bulk                          */
++    BULK_EP_SIZE, 0,        /* wMaxPacketSize                               */
++    0,                      /* bInterval                                    */
++};
++
++/* String descriptors */
++static const unsigned char str0[] = {
++    4, USB_DT_STRING, 0x09, 0x04  /* English (US) */
++};
++static const unsigned char str_manufacturer[] = {
++    22, USB_DT_STRING,
++    'O',0,'p',0,'e',0,'n',0,'P',0,'h',0,'o',0,'n',0,'e',0,'P',0,
++};
++static const unsigned char str_product[] = {
++    30, USB_DT_STRING,
++    'G',0,'F',0,'P',0,'-',0,'1',0,'0',0,'5',0,'A',0,' ',0,
++    'C',0,'o',0,'n',0,'s',0,'o',0,'l',0,'e',0,
++};
++static const unsigned char str_serial[] = {
++    10, USB_DT_STRING,
++    'W',0,'D',0,'0',0,'3',0,'1',0,
++};
++
++static const unsigned char *string_table[] = {
++    str0, str_manufacturer, str_product, str_serial
++};
++
++/* CDC line coding (115200 8N1 — host can change this but we ignore it) */
++static unsigned char line_coding[7] = {
++    0x00, 0xC2, 0x01, 0x00,  /* dwDTERate = 115200 LE                      */
++    0x00,                    /* bCharFormat = 1 stop bit                    */
++    0x00,                    /* bParityType = none                          */
++    0x08,                    /* bDataBits = 8                               */
++};
++
++/* ── Driver state ───────────────────────────────────────────────────────── */
++
++static int usb_configured = 0;
++static unsigned char usb_address = 0;
++
++/* Simple ring buffers for RX/TX */
++#define CDC_BUF_SIZE    256
++static unsigned char rx_buf[CDC_BUF_SIZE];
++static unsigned char tx_buf[CDC_BUF_SIZE];
++static int rx_head = 0, rx_tail = 0;
++static int tx_head = 0, tx_tail = 0;
++
++#define BUF_EMPTY(h, t)         ((h) == (t))
++#define BUF_FULL(h, t)          (((h + 1) % CDC_BUF_SIZE) == (t))
++#define BUF_PUT(buf, h, t, c)   do { (buf)[(h)] = (c); (h) = ((h)+1) % CDC_BUF_SIZE; } while(0)
++#define BUF_GET(buf, h, t, c)   do { (c) = (buf)[(t)]; (t) = ((t)+1) % CDC_BUF_SIZE; } while(0)
++
++/* ── MUSB register helpers ──────────────────────────────────────────────── */
++
++static inline void musb_select_ep(int ep)
++{
++    REG8(MT6261_USB_BASE + MUSB_INDEX) = ep;
++}
++
++static inline void musb_write_fifo(int ep, const unsigned char *buf, int len)
++{
++    unsigned int fifo = MT6261_USB_BASE + MUSB_FIFO(ep);
++    int i;
++    for (i = 0; i < len; i++)
++        REG8(fifo) = buf[i];
++}
++
++static inline int musb_read_fifo(int ep, unsigned char *buf, int max)
++{
++    unsigned int fifo = MT6261_USB_BASE + MUSB_FIFO(ep);
++    int i;
++    musb_select_ep(ep);
++    int count = REG16(MT6261_USB_BASE + MUSB_RXCOUNT);
++    if (count > max) count = max;
++    for (i = 0; i < count; i++)
++        buf[i] = REG8(fifo);
++    return count;
++}
++
++/* ── EP0 control transfer handler ───────────────────────────────────────── */
++
++typedef struct {
++    unsigned char  bmRequestType;
++    unsigned char  bRequest;
++    unsigned short wValue;
++    unsigned short wIndex;
++    unsigned short wLength;
++} usb_setup_t;
++
++static void ep0_send(const unsigned char *buf, int len, int max)
++{
++    if (len > max) len = max;
++    musb_select_ep(0);
++    musb_write_fifo(0, buf, len);
++    unsigned short csr = REG16(MT6261_USB_BASE + MUSB_CSR0);
++    csr |= CSR0_TXPKTRDY;
++    if (len < EP0_SIZE) csr |= CSR0_DATAEND;
++    REG16(MT6261_USB_BASE + MUSB_CSR0) = csr;
++}
++
++static void ep0_stall(void)
++{
++    musb_select_ep(0);
++    REG16(MT6261_USB_BASE + MUSB_CSR0) |= CSR0_SENDSTALL;
++}
++
++static void handle_setup(usb_setup_t *setup)
++{
++    int desc_type  = setup->wValue >> 8;
++    int desc_index = setup->wValue & 0xFF;
++
++    switch (setup->bRequest) {
++
++    case USB_REQ_GET_DESCRIPTOR:
++        switch (desc_type) {
++        case USB_DT_DEVICE:
++            ep0_send(device_descriptor,
++                     sizeof(device_descriptor), setup->wLength);
++            break;
++        case USB_DT_CONFIG:
++            ep0_send(config_descriptor,
++                     sizeof(config_descriptor), setup->wLength);
++            break;
++        case USB_DT_STRING:
++            if (desc_index < 4)
++                ep0_send(string_table[desc_index],
++                         string_table[desc_index][0], setup->wLength);
++            else
++                ep0_stall();
++            break;
++        default:
++            ep0_stall();
++        }
++        break;
++
++    case USB_REQ_SET_ADDRESS:
++        usb_address = setup->wValue & 0x7F;
++        /* Send ZLP then set address */
++        musb_select_ep(0);
++        REG16(MT6261_USB_BASE + MUSB_CSR0) = CSR0_TXPKTRDY | CSR0_DATAEND;
++        REG8(MT6261_USB_BASE + MUSB_FADDR) = usb_address;
++        break;
++
++    case USB_REQ_SET_CONFIG:
++        usb_configured = (setup->wValue != 0);
++        musb_select_ep(0);
++        REG16(MT6261_USB_BASE + MUSB_CSR0) = CSR0_TXPKTRDY | CSR0_DATAEND;
++        break;
++
++    /* CDC ACM class requests — accept but mostly ignore */
++    case USB_REQ_SET_LINE_CODING:
++        /* Host sets baud rate etc. — we accept but use UART anyway */
++        musb_select_ep(0);
++        REG16(MT6261_USB_BASE + MUSB_CSR0) =
++            CSR0_SVDRXPKTRDY | CSR0_DATAEND;
++        break;
++
++    case USB_REQ_GET_LINE_CODING:
++        ep0_send(line_coding, sizeof(line_coding), setup->wLength);
++        break;
++
++    case USB_REQ_SET_CTL_STATE:
++        /* DTR/RTS — accept, send ZLP */
++        musb_select_ep(0);
++        REG16(MT6261_USB_BASE + MUSB_CSR0) = CSR0_TXPKTRDY | CSR0_DATAEND;
++        break;
++
++    default:
++        ep0_stall();
++    }
++}
++
++/* ── USB interrupt handler ──────────────────────────────────────────────── */
++
++void mt6261_usb_irq(void)
++{
++    unsigned char intrusb;
++    unsigned short intrtx, intrrx;
++    unsigned char setup_buf[8];
++
++    intrusb = REG8(MT6261_USB_BASE + MUSB_INTRUSB);
++    intrtx  = REG16(MT6261_USB_BASE + MUSB_INTRTX);
++    intrrx  = REG16(MT6261_USB_BASE + MUSB_INTRRX);
++
++    /* Bus reset — re-enumerate */
++    if (intrusb & INTRUSB_RESET) {
++        usb_configured = 0;
++        usb_address    = 0;
++        rx_head = rx_tail = 0;
++        tx_head = tx_tail = 0;
++        REG8(MT6261_USB_BASE + MUSB_FADDR) = 0;
++    }
++
++    /* EP0 control transfer */
++    if (intrtx & (1 << EP_CTRL)) {
++        musb_select_ep(0);
++        unsigned short csr0 = REG16(MT6261_USB_BASE + MUSB_CSR0);
++
++        if (csr0 & CSR0_SETUPEND) {
++            REG16(MT6261_USB_BASE + MUSB_CSR0) = CSR0_SVDSETUPEND;
++        }
++        if (csr0 & CSR0_RXPKTRDY) {
++            /* Read setup packet from FIFO */
++            unsigned int fifo = MT6261_USB_BASE + MUSB_FIFO(0);
++            int i;
++            for (i = 0; i < 8; i++)
++                setup_buf[i] = REG8(fifo);
++            REG16(MT6261_USB_BASE + MUSB_CSR0) = CSR0_SVDRXPKTRDY;
++            handle_setup((usb_setup_t *)setup_buf);
++        }
++    }
++
++    /* EP2 bulk OUT — data from host (incoming chars) */
++    if (intrrx & (1 << EP_BULK_OUT)) {
++        unsigned char tmp[BULK_EP_SIZE];
++        int n = musb_read_fifo(EP_BULK_OUT, tmp, BULK_EP_SIZE);
++        int i;
++        for (i = 0; i < n; i++) {
++            if (!BUF_FULL(rx_head, rx_tail))
++                BUF_PUT(rx_buf, rx_head, rx_tail, tmp[i]);
++        }
++        musb_select_ep(EP_BULK_OUT);
++        REG16(MT6261_USB_BASE + MUSB_RXCSR) &= ~RXCSR_RXPKTRDY;
++    }
++
++    /* EP1 bulk IN — check if we have data to send */
++    if (intrtx & (1 << EP_BULK_IN)) {
++        if (!BUF_EMPTY(tx_head, tx_tail)) {
++            unsigned char tmp[BULK_EP_SIZE];
++            int n = 0;
++            while (n < BULK_EP_SIZE && !BUF_EMPTY(tx_head, tx_tail)) {
++                unsigned char c;
++                BUF_GET(tx_buf, tx_head, tx_tail, c);
++                tmp[n++] = c;
++            }
++            musb_select_ep(EP_BULK_IN);
++            musb_write_fifo(EP_BULK_IN, tmp, n);
++            REG16(MT6261_USB_BASE + MUSB_TXCSR) |= TXCSR_TXPKTRDY;
++        }
++    }
++}
++
++/* ── Public API ─────────────────────────────────────────────────────────── */
++
++void mt6261_usb_init(void)
++{
++    extern void uart_puts(const char *);
++    uart_puts("USB: init CDC ACM...\r\n");
++
++    /* Enable USB clock */
++    REG32(MT6261_PDN_CLR0) = PDN0_USB;
++
++    /* Soft reset USB controller */
++    REG32(MT6261_USB_SWRST) = 1;
++    /* busy-wait reset */
++    volatile int i = 10000;
++    while (i--) ;
++    REG32(MT6261_USB_SWRST) = 0;
++
++    /* Power up USB PHY */
++    REG32(MT6261_USB_PHYCTRL)  = 0x00000004;  /* enable PHY                */
++    REG32(MT6261_USB_PHYCTRL6) = 0x00000000;  /* normal mode               */
++
++    /* Configure EP1 (Bulk IN) */
++    musb_select_ep(EP_BULK_IN);
++    REG16(MT6261_USB_BASE + MUSB_TXMAXP) = BULK_EP_SIZE;
++    REG16(MT6261_USB_BASE + MUSB_TXCSR)  =
++        TXCSR_CLRDATATOG | TXCSR_FLUSHFIFO;
++
++    /* Configure EP2 (Bulk OUT) */
++    musb_select_ep(EP_BULK_OUT);
++    REG16(MT6261_USB_BASE + MUSB_RXMAXP) = BULK_EP_SIZE;
++    REG16(MT6261_USB_BASE + MUSB_RXCSR)  =
++        RXCSR_CLRDATATOG | RXCSR_FLUSHFIFO;
++
++    /* Configure EP3 (Interrupt IN) */
++    musb_select_ep(EP_INTR_IN);
++    REG16(MT6261_USB_BASE + MUSB_TXMAXP) = INTR_EP_SIZE;
++
++    musb_select_ep(0);
++
++    /* Enable interrupts */
++    REG16(MT6261_USB_BASE + MUSB_INTRTXE) =
++        (1 << EP_CTRL) | (1 << EP_BULK_IN);
++    REG16(MT6261_USB_BASE + MUSB_INTRRXE) =
++        (1 << EP_BULK_OUT);
++    REG8(MT6261_USB_BASE + MUSB_INTRUSBE) =
++        INTRUSB_RESET;
++
++    /* Connect to USB bus */
++    REG8(MT6261_USB_BASE + MUSB_POWER) =
++        POWER_SOFTCONN | POWER_ENSUSPM;
++
++    uart_puts("USB: waiting for host...\r\n");
++}
++
++/* Flush pending TX data to host */
++static void usb_tx_flush(void)
++{
++    if (!usb_configured || BUF_EMPTY(tx_head, tx_tail))
++        return;
++
++    musb_select_ep(EP_BULK_IN);
++    unsigned short txcsr = REG16(MT6261_USB_BASE + MUSB_TXCSR);
++    if (txcsr & TXCSR_TXPKTRDY)
++        return; /* Previous packet not yet sent */
++
++    unsigned char tmp[BULK_EP_SIZE];
++    int n = 0;
++    while (n < BULK_EP_SIZE && !BUF_EMPTY(tx_head, tx_tail)) {
++        unsigned char c;
++        BUF_GET(tx_buf, tx_head, tx_tail, c);
++        tmp[n++] = c;
++    }
++    musb_write_fifo(EP_BULK_IN, tmp, n);
++    REG16(MT6261_USB_BASE + MUSB_TXCSR) |= TXCSR_TXPKTRDY;
++}
++
++void usb_cdc_putc(int c)
++{
++    /* Poll USB interrupts while waiting for space */
++    int timeout = 100000;
++    while (BUF_FULL(tx_head, tx_tail) && timeout--) {
++        mt6261_usb_irq();
++        usb_tx_flush();
++    }
++    if (!BUF_FULL(tx_head, tx_tail))
++        BUF_PUT(tx_buf, tx_head, tx_tail, (unsigned char)c);
++    usb_tx_flush();
++}
++
++int usb_cdc_getc(void)
++{
++    /* Poll until a char arrives */
++    while (BUF_EMPTY(rx_head, rx_tail))
++        mt6261_usb_irq();
++    unsigned char c;
++    BUF_GET(rx_buf, rx_head, rx_tail, c);
++    return c;
++}
++
++int usb_cdc_tstc(void)
++{
++    mt6261_usb_irq();
++    return !BUF_EMPTY(rx_head, rx_tail);
++}
++
++int usb_cdc_configured(void)
++{
++    mt6261_usb_irq();
++    return usb_configured;
++}
+diff --git a/arch/arm/mt6261/usb_cdc.h b/arch/arm/mt6261/usb_cdc.h
+new file mode 100644
+index 0000000..1e668e5
+--- /dev/null
++++ b/arch/arm/mt6261/usb_cdc.h
+@@ -0,0 +1,29 @@
++/* arch/arm/mt6261/usb_cdc.h
++ * OpenPhone — MT6261 USB CDC ACM driver interface
++ *
++ * Copyright (C) 2026 OpenPhone Project
++ * SPDX-License-Identifier: GPL-2.0-only
++ */
++
++#ifndef USB_CDC_H
++#define USB_CDC_H
++
++/* Initialise USB controller and connect to host as CDC ACM device */
++void mt6261_usb_init(void);
++
++/* Send one character over USB CDC bulk IN endpoint */
++void usb_cdc_putc(int c);
++
++/* Receive one character (blocking) */
++int  usb_cdc_getc(void);
++
++/* Non-blocking: 1 if a character is available */
++int  usb_cdc_tstc(void);
++
++/* 1 if host has configured the device (SET_CONFIGURATION received) */
++int  usb_cdc_configured(void);
++
++/* Poll USB interrupts — call from main loop if not using real IRQs */
++void mt6261_usb_irq(void);
++
++#endif /* USB_CDC_H */
+diff --git a/config/examples/arm_mt6261_config.xml b/config/examples/arm_mt6261_config.xml
+new file mode 100644
+index 0000000..e879b1d
+--- /dev/null
++++ b/config/examples/arm_mt6261_config.xml
+@@ -0,0 +1,70 @@
++<!-- config/examples/arm_mt6261_config.xml
++     OpenPhone build configuration for GFP-105A / MT6261
++     Based on OpenBIOS build system
++-->
++
++  <!-- Target architecture -->
++  <option name="CONFIG_ARM_MT6261"    type="boolean" value="true"/>
++  <option name="CONFIG_IMAGE_ELF"     type="boolean" value="true"/>
++
++  <!-- Kernel debugging — all over UART0 -->
++  <option name="CONFIG_DEBUG"                  type="boolean" value="true"/>
++  <option name="CONFIG_DEBUG_BOOT"             type="boolean" value="true"/>
++  <option name="CONFIG_DEBUG_CONSOLE"          type="boolean" value="true"/>
++  <option name="CONFIG_DEBUG_CONSOLE_SERIAL"   type="boolean" value="true"/>
++  <option name="CONFIG_DEBUG_CONSOLE_VIDEO"    type="boolean" value="false"/>
++  <option name="CONFIG_SERIAL_PORT"            type="integer" value="0"/>
++  <option name="CONFIG_SERIAL_SPEED"           type="integer" value="115200"/>
++
++  <!-- Disable unneeded debug -->
++  <option name="CONFIG_DEBUG_DSTACK"       type="boolean" value="false"/>
++  <option name="CONFIG_DEBUG_RSTACK"       type="boolean" value="false"/>
++  <option name="CONFIG_DEBUG_DICTIONARY"   type="boolean" value="false"/>
++  <option name="CONFIG_DEBUG_INTERNAL"     type="boolean" value="false"/>
++  <option name="CONFIG_DEBUG_INTERPRETER"  type="boolean" value="false"/>
++  <option name="CONFIG_DEBUG_OFMEM"        type="boolean" value="false"/>
++
++  <!-- Core modules -->
++  <option name="CONFIG_CMDLINE"              type="boolean" value="true"/>
++  <option name="CONFIG_DEBLOCKER"            type="boolean" value="true"/>
++  <option name="CONFIG_OFMEM"               type="boolean" value="true"/>
++  <option name="CONFIG_OFMEM_MALLOC_ALIGN"  type="integer" value="4"/>
++
++  <!-- Loaders -->
++  <option name="CONFIG_LOADER_ELF"    type="boolean" value="true"/>
++  <option name="CONFIG_LOADER_AOUT"   type="boolean" value="false"/>
++  <option name="CONFIG_LOADER_FCODE"  type="boolean" value="true"/>
++  <option name="CONFIG_LOADER_FORTH"  type="boolean" value="true"/>
++  <option name="CONFIG_LOADER_XCOFF"  type="boolean" value="false"/>
++
++  <!-- Font (for future LCD support) -->
++  <option name="CONFIG_FONT_8X8"   type="boolean" value="true"/>
++  <option name="CONFIG_FONT_8X16"  type="boolean" value="false"/>
++
++  <!-- Filesystem — FAT32 for SD card -->
++  <option name="CONFIG_DISK_LABEL"      type="boolean" value="true"/>
++  <option name="CONFIG_PART_SUPPORT"    type="boolean" value="true"/>
++  <option name="CONFIG_PC_PARTS"        type="boolean" value="true"/>
++  <option name="CONFIG_SUN_PARTS"       type="boolean" value="false"/>
++  <option name="CONFIG_FSYS_FAT"        type="boolean" value="true"/>
++  <option name="CONFIG_FSYS_EXT2FS"     type="boolean" value="false"/>
++  <option name="CONFIG_FSYS_ISO9660"    type="boolean" value="false"/>
++  <option name="CONFIG_FSYS_UFS"        type="boolean" value="false"/>
++  <option name="CONFIG_FSYS_FFS"        type="boolean" value="false"/>
++  <option name="CONFIG_HFS"             type="boolean" value="false"/>
++  <option name="CONFIG_HFSP"            type="boolean" value="false"/>
++  <option name="CONFIG_GRUBFS"          type="boolean" value="false"/>
++  <option name="CONFIG_DEBUG_FS"        type="boolean" value="false"/>
++
++  <!-- Drivers — only what GFP-105A needs -->
++  <option name="CONFIG_DRIVER_MSDC"    type="boolean" value="true"/>
++  <option name="CONFIG_DRIVER_UART"    type="boolean" value="true"/>
++  <option name="CONFIG_DRIVER_SBUS"    type="boolean" value="false"/>
++  <option name="CONFIG_DRIVER_OBIO"    type="boolean" value="false"/>
++  <option name="CONFIG_DRIVER_ESP"     type="boolean" value="false"/>
++  <option name="CONFIG_DRIVER_FLOPPY"  type="boolean" value="false"/>
++  <option name="CONFIG_DRIVER_ESCC"    type="boolean" value="false"/>
++  <option name="CONFIG_DRIVER_FW_CFG"  type="boolean" value="false"/>
++
++  <!-- No QEMU on real hardware -->
++  <option name="CONFIG_LINUXBIOS"  type="boolean" value="false"/>
