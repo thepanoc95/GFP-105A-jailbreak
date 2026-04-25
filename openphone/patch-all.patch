@@ -9,10 +9,10 @@ index 0000000..cf8bbe6
 +</build>
 diff --git a/arch/arm/mt6261/build.xml b/arch/arm/mt6261/build.xml
 new file mode 100644
-index 0000000..4013080
+index 0000000..81d9068
 --- /dev/null
 +++ b/arch/arm/mt6261/build.xml
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,39 @@
 +<build condition="ARM_MT6261">
 +
 + <!-- OpenPhone Forth dictionary for GFP-105A -->
@@ -27,6 +27,8 @@ index 0000000..4013080
 +  <object source="uart.c"/>
 +  <object source="msdc.c"/>
 +  <object source="usb_cdc.c"/>
++  <object source="lcd.c"/>
++  <object source="console_lcd.c"/>
 +  <object source="devices.c"/>
 +  <object source="entry.S"/>
 + </library>
@@ -50,12 +52,253 @@ index 0000000..4013080
 + </executable>
 +
 +</build>
+diff --git a/arch/arm/mt6261/console_lcd.c b/arch/arm/mt6261/console_lcd.c
+new file mode 100644
+index 0000000..48d8ec1
+--- /dev/null
++++ b/arch/arm/mt6261/console_lcd.c
+@@ -0,0 +1,235 @@
++/* arch/arm/mt6261/console_lcd.c
++ * OpenPhone — LCD text console using OpenBIOS 8x16 bitmap font
++ * Displays the OpenFirmware 'ok' prompt and all output on the LCD
++ *
++ * Copyright (C) 2026 OpenPhone Project
++ * SPDX-License-Identifier: GPL-2.0-only
++ *
++ * Terminal geometry at 8x16 font on 240x320:
++ *   Columns: 240 / 8  = 30 chars
++ *   Rows:    320 / 16 = 20 rows
++ *   Total:   600 characters
++ *
++ * The console scrolls when the last row is reached.
++ * All output also mirrors to UART/USB so you always have a serial log.
++ */
++
++#include "config.h"
++#include "lcd.h"
++#include "mt6261.h"
++
++/* ── Font ───────────────────────────────────────────────────────────────── */
++
++/*
++ * OpenBIOS ships an 8x16 bitmap font in packages/font8x16.c.
++ * We reference it here via the extern declaration.
++ * Each character is 16 bytes (one byte per row, 8 pixels wide).
++ */
++extern const unsigned char font8x16[256 * 16];
++
++#define FONT_W      8
++#define FONT_H      16
++
++/* ── Terminal state ─────────────────────────────────────────────────────── */
++
++#define CON_COLS    (LCD_WIDTH  / FONT_W)   /* 30 */
++#define CON_ROWS    (LCD_HEIGHT / FONT_H)   /* 20 */
++
++/* Top margin for the banner (2 rows) */
++#define CON_BANNER_ROWS     2
++#define CON_TEXT_ROWS       (CON_ROWS - CON_BANNER_ROWS)  /* 18 */
++#define CON_TEXT_Y_START    (CON_BANNER_ROWS * FONT_H)    /* 32px */
++
++static int con_col = 0;
++static int con_row = 0;  /* 0 = top of text area */
++
++/* Color state — can be changed for colored output */
++static unsigned short con_fg = LCD_CON_FG;
++static unsigned short con_bg = LCD_CON_BG;
++
++/* ── Low-level glyph renderer ───────────────────────────────────────────── */
++
++static void draw_glyph(int col, int row, unsigned char c,
++                       unsigned short fg, unsigned short bg)
++{
++    const unsigned char *glyph = &font8x16[(unsigned int)c * FONT_H];
++    int px = col * FONT_W;
++    int py = CON_TEXT_Y_START + row * FONT_H;
++    int r, b;
++
++    for (r = 0; r < FONT_H; r++) {
++        unsigned char line = glyph[r];
++        for (b = 0; b < FONT_W; b++) {
++            unsigned short color = (line & (0x80 >> b)) ? fg : bg;
++            lcd_putpixel(px + b, py + r, color);
++        }
++    }
++}
++
++/* ── Scroll one line ────────────────────────────────────────────────────── */
++
++static void con_scroll(void)
++{
++    unsigned short *fb = (unsigned short *)LCD_FB_BASE;
++    int scroll_px   = FONT_H;
++    int text_start  = CON_TEXT_Y_START * LCD_WIDTH;
++    int text_pixels = (CON_TEXT_ROWS - 1) * FONT_H * LCD_WIDTH;
++    int i;
++
++    /* Shift framebuffer up by one row of pixels */
++    for (i = 0; i < text_pixels; i++)
++        fb[text_start + i] = fb[text_start + i + scroll_px * LCD_WIDTH];
++
++    /* Clear the new bottom row */
++    for (i = 0; i < FONT_H * LCD_WIDTH; i++)
++        fb[text_start + (CON_TEXT_ROWS - 1) * FONT_H * LCD_WIDTH + i] = con_bg;
++}
++
++/* ── Newline handling ───────────────────────────────────────────────────── */
++
++static void con_newline(void)
++{
++    con_col = 0;
++    con_row++;
++    if (con_row >= CON_TEXT_ROWS) {
++        con_scroll();
++        con_row = CON_TEXT_ROWS - 1;
++    }
++}
++
++/* ── Banner ─────────────────────────────────────────────────────────────── */
++
++static void draw_banner(void)
++{
++    const char *line1 = "OpenPhone OpenBIOS v0.1";
++    const char *line2 = "GFP-105A / MT6261";
++    int i;
++
++    /* Fill banner background */
++    lcd_fillrect(0, 0, LCD_WIDTH, CON_BANNER_ROWS * FONT_H, LCD_CON_BG);
++
++    /* Draw separator line */
++    lcd_hline(0, CON_BANNER_ROWS * FONT_H - 1, LCD_WIDTH, LCD_CON_BANNER_FG);
++
++    /* Draw banner text */
++    for (i = 0; line1[i]; i++) {
++        const unsigned char *glyph = &font8x16[(unsigned char)line1[i] * FONT_H];
++        int px = i * FONT_W;
++        int r, b;
++        for (r = 0; r < FONT_H / 2; r++) {  /* half height for row 0 */
++            unsigned char byte = glyph[r];
++            for (b = 0; b < FONT_W; b++) {
++                unsigned short c = (byte & (0x80 >> b))
++                    ? LCD_CON_BANNER_FG : LCD_CON_BG;
++                lcd_putpixel(px + b, r, c);
++            }
++        }
++    }
++    for (i = 0; line2[i]; i++) {
++        const unsigned char *glyph = &font8x16[(unsigned char)line2[i] * FONT_H];
++        int px = i * FONT_W;
++        int r, b;
++        for (r = 0; r < FONT_H / 2; r++) {
++            unsigned char byte = glyph[r];
++            for (b = 0; b < FONT_W; b++) {
++                unsigned short c = (byte & (0x80 >> b))
++                    ? LCD_COLOR_GRAY : LCD_CON_BG;
++                lcd_putpixel(px + b, FONT_H / 2 + r, c);
++            }
++        }
++    }
++}
++
++/* ── Public API ─────────────────────────────────────────────────────────── */
++
++void lcd_console_init(void)
++{
++    lcd_fill(LCD_CON_BG);
++    draw_banner();
++    con_col = 0;
++    con_row = 0;
++    con_fg  = LCD_CON_FG;
++    con_bg  = LCD_CON_BG;
++    lcd_flush();
++}
++
++void lcd_console_clear(void)
++{
++    lcd_fillrect(0, CON_TEXT_Y_START,
++                 LCD_WIDTH, CON_TEXT_ROWS * FONT_H,
++                 LCD_CON_BG);
++    con_col = 0;
++    con_row = 0;
++    lcd_flush();
++}
++
++void lcd_console_putc(int c)
++{
++    switch (c) {
++    case '\r':
++        con_col = 0;
++        break;
++    case '\n':
++        con_newline();
++        lcd_flush();
++        break;
++    case '\t':
++        /* Tab stop every 8 columns */
++        do {
++            draw_glyph(con_col, con_row, ' ', con_fg, con_bg);
++            con_col++;
++            if (con_col >= CON_COLS) con_newline();
++        } while (con_col % 8 != 0);
++        break;
++    case '\b':
++        if (con_col > 0) {
++            con_col--;
++            draw_glyph(con_col, con_row, ' ', con_fg, con_bg);
++        }
++        break;
++    case '\007':
++        /* Bell — flash screen briefly */
++        lcd_fill(LCD_CON_FG);
++        lcd_fill(LCD_CON_BG);
++        lcd_console_init();
++        break;
++    default:
++        if (c >= 32 && c < 256) {
++            draw_glyph(con_col, con_row, (unsigned char)c, con_fg, con_bg);
++            con_col++;
++            if (con_col >= CON_COLS)
++                con_newline();
++        }
++        break;
++    }
++}
++
++void lcd_console_puts(const char *s)
++{
++    while (*s)
++        lcd_console_putc(*s++);
++    lcd_flush();
++}
++
++/* ── Color control words (for Forth) ────────────────────────────────────── */
++
++void lcd_set_fg(unsigned short color) { con_fg = color; }
++void lcd_set_bg(unsigned short color) { con_bg = color; }
++
++void lcd_set_color_normal(void)
++{
++    con_fg = LCD_CON_FG;
++    con_bg = LCD_CON_BG;
++}
++
++void lcd_set_color_error(void)
++{
++    con_fg = LCD_CON_ERROR_FG;
++    con_bg = LCD_CON_BG;
++}
++
++void lcd_set_color_prompt(void)
++{
++    con_fg = LCD_CON_PROMPT_FG;
++    con_bg = LCD_CON_BG;
++}
 diff --git a/arch/arm/mt6261/cpu.fs b/arch/arm/mt6261/cpu.fs
 new file mode 100644
-index 0000000..7beaa32
+index 0000000..15f5eb8
 --- /dev/null
 +++ b/arch/arm/mt6261/cpu.fs
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,142 @@
 +\ arch/arm/mt6261/cpu.fs
 +\ OpenPhone — MT6261 CPU Forth words
 +\
@@ -152,6 +395,32 @@ index 0000000..7beaa32
 +    ." Jumping to loaded image..." cr
 +    70010000 execute ;
 +
++\ ── LCD words ───────────────────────────────────────────────────────────────
++
++800b0000 constant LCD-BASE
++
++\ ( -- )  Clear LCD text console
++: lcd-cls  ( -- )  lcd_console_clear ;
++
++\ ( color -- )  Fill LCD with solid color
++: lcd-fill  ( color -- )  lcd_fill ;
++
++\ ( x y color -- )  Draw pixel
++: lcd-pixel!  ( x y color -- )
++    rot rot lcd_putpixel ;
++
++\ ( -- )  Flush framebuffer to panel
++: lcd-flush  ( -- )  lcd_flush ;
++
++\ ( -- )  Switch output colors to error (red)
++: lcd-error-color   ( -- )  lcd_set_color_error ;
++
++\ ( -- )  Switch output colors to prompt (cyan)  
++: lcd-prompt-color  ( -- )  lcd_set_color_prompt ;
++
++\ ( -- )  Restore normal colors
++: lcd-normal-color  ( -- )  lcd_set_color_normal ;
++
 +\ ── USB CDC words ───────────────────────────────────────────────────────────
 +
 +80060000 constant USB-BASE
@@ -165,7 +434,8 @@ index 0000000..7beaa32
 +        ." Console: USB CDC ACM (/dev/ttyACM0)" cr
 +    else
 +        ." Console: UART0 @ 115200 8N1" cr
-+    then ;
++    then
++    ." LCD:     240x320 RGB565 always active" cr ;
 +
 +decimal
 +
@@ -448,6 +718,385 @@ index 0000000..bec5172
 +cr
 +." GFP-105A / MediaTek MT6261 / WD031 SS V00" cr
 +cr
+diff --git a/arch/arm/mt6261/lcd.c b/arch/arm/mt6261/lcd.c
+new file mode 100644
+index 0000000..13df2b3
+--- /dev/null
++++ b/arch/arm/mt6261/lcd.c
+@@ -0,0 +1,313 @@
++/* arch/arm/mt6261/lcd.c
++ * OpenPhone — MT6261 LCD controller driver
++ * Target: Gradiente Neo Flip 105A (GFP-105A)
++ * Panel: 240x320 QVGA, RGB565 (16bpp)
++ *
++ * Copyright (C) 2026 OpenPhone Project
++ * SPDX-License-Identifier: GPL-2.0-only
++ *
++ * The MT6261 has a built-in parallel LCD interface controller.
++ * The panel is most likely an ILI9341, ILI9163, or ST7789 driven
++ * over an 8/16-bit parallel bus.
++ *
++ * NOTE: The hardware init sequence (mt6261_lcd_hw_init) is stubbed.
++ * Extract the real sequence from dump_preloader.bin:
++ *
++ *   python3 -c "
++ *   import struct
++ *   data = open('dump.bin','rb').read()
++ *   target = bytes([0x00, 0x00, 0x0B, 0x80])  # 0x800B0000 LE
++ *   i = 0
++ *   while True:
++ *       idx = data.find(target, i)
++ *       if idx < 0: break
++ *       print(f'0x800B0000 ref at {idx:#08x}')
++ *       i = idx + 1
++ *   "
++ *
++ * Then disassemble the surrounding Thumb code and transcribe the
++ * register writes into mt6261_lcd_hw_init() below.
++ */
++
++#include "config.h"
++#include "mt6261.h"
++#include "lcd.h"
++
++#define REG32(a)    (*(volatile unsigned int *)(a))
++#define REG16(a)    (*(volatile unsigned short *)(a))
++#define REG8(a)     (*(volatile unsigned char *)(a))
++
++/* ── MT6261 LCD controller registers (offset from MT6261_LCD_BASE) ──────── */
++
++#define LCD_WROI_CTRL       0x0000  /* Write ROI control                    */
++#define LCD_WROI_CMD        0x0004  /* Command/data write                   */
++#define LCD_WROI_DATA       0x0008  /* Data write                           */
++#define LCD_WROI_SIZE       0x000C  /* ROI size (width | height<<16)        */
++#define LCD_WROI_BGCLR      0x0010  /* Background color                     */
++#define LCD_LAYER_EN        0x0020  /* Layer enable                         */
++#define LCD_LAYER0_CTRL     0x0024  /* Layer 0 control                      */
++#define LCD_LAYER0_SRC      0x0028  /* Layer 0 source address               */
++#define LCD_LAYER0_PITCHSZ  0x002C  /* Layer 0 pitch and size               */
++#define LCD_LAYER0_WINDOW   0x0030  /* Layer 0 window position              */
++#define LCD_TEARING_EN      0x0040  /* Tearing effect enable                */
++#define LCD_STATUS          0x0100  /* Controller status                    */
++#define LCD_INTEN           0x0104  /* Interrupt enable                     */
++#define LCD_INTSTA          0x0108  /* Interrupt status                     */
++#define LCD_SERIAL_CFG      0x0200  /* Serial interface config (if SPI)     */
++#define LCD_PARALLEL_CFG    0x0204  /* Parallel interface config            */
++#define LCD_RESET_CTRL      0x0300  /* Reset control                        */
++
++/* LCD_WROI_CTRL bits */
++#define LCD_CTRL_START      (1 << 0)    /* Start transfer                   */
++#define LCD_CTRL_STOP       (1 << 1)    /* Stop transfer                    */
++#define LCD_CTRL_IF_SEL     (1 << 4)    /* Interface select (0=par, 1=ser)  */
++
++/* LCD_PARALLEL_CFG bits */
++#define LCD_PAR_16BIT       (1 << 0)    /* 16-bit parallel bus              */
++#define LCD_PAR_9BIT        (0 << 0)    /* 9-bit parallel bus               */
++
++/* LCD_STATUS bits */
++#define LCD_STATUS_BUSY     (1 << 0)
++
++/* Layer control bits */
++#define LCD_LAYER_RGB565    (0x0 << 4)  /* Pixel format: RGB565             */
++#define LCD_LAYER_RGB888    (0x1 << 4)  /* Pixel format: RGB888             */
++#define LCD_LAYER_EN_BIT    (1 << 0)
++
++/* GPIO for LCD reset and backlight — TODO: verify from dump */
++#define LCD_RESET_GPIO      47          /* GPIO pin for LCD reset           */
++#define LCD_BL_GPIO         11          /* GPIO pin for backlight PWM/on    */
++
++/* ── Framebuffer ────────────────────────────────────────────────────────── */
++
++/* 240*320*2 = 153600 bytes = 150KB
++ * Placed at top of SRAM below the stack.
++ * Stack is at 0x7003FFFC growing down.
++ * Framebuffer: 0x70040000 - 150KB = 0x70016800 .. 0x70040000
++ * But we also need code space — place FB at a fixed known address.
++ */
++#define LCD_FB_BASE         0x70016800  /* 150KB framebuffer in SRAM        */
++#define LCD_FB_WIDTH        240
++#define LCD_FB_HEIGHT       320
++#define LCD_FB_BPP          16          /* RGB565                           */
++#define LCD_FB_STRIDE       (LCD_FB_WIDTH * 2)
++#define LCD_FB_SIZE         (LCD_FB_STRIDE * LCD_FB_HEIGHT)  /* 153600 B   */
++
++static unsigned short *fb = (unsigned short *)LCD_FB_BASE;
++
++/* ── GPIO helpers ───────────────────────────────────────────────────────── */
++
++static void gpio_out(int pin, int val)
++{
++    unsigned int base = MT6261_GPIO_BASE;
++    unsigned int reg  = base + (pin / 16) * 0x10;
++    unsigned int bit  = 1 << (pin % 16);
++    if (val)
++        REG16(reg) |= bit;
++    else
++        REG16(reg) &= ~bit;
++}
++
++static void msleep(int ms)
++{
++    volatile int i = ms * 10000;
++    while (i--)
++        ;
++}
++
++/* ── Panel command/data write (parallel interface) ──────────────────────── */
++
++static void lcd_wait_ready(void)
++{
++    int timeout = 100000;
++    while ((REG32(MT6261_LCD_BASE + LCD_STATUS) & LCD_STATUS_BUSY) && timeout--)
++        ;
++}
++
++static void lcd_write_cmd(unsigned short cmd)
++{
++    lcd_wait_ready();
++    REG32(MT6261_LCD_BASE + LCD_WROI_CMD) = cmd;
++}
++
++static void lcd_write_dat(unsigned short dat)
++{
++    lcd_wait_ready();
++    REG32(MT6261_LCD_BASE + LCD_WROI_DATA) = dat;
++}
++
++/* ── Hardware init sequence ─────────────────────────────────────────────── */
++
++static void mt6261_lcd_hw_init(void)
++{
++    /*
++     * TODO: Replace this stub with the real init sequence extracted
++     * from dump_preloader.bin.
++     *
++     * To extract:
++     * 1. Search dump.bin for 0x800B0000 references (see file header)
++     * 2. Disassemble surrounding Thumb code with:
++     *    arm-none-eabi-objdump -D -b binary -m arm -M force-thumb \
++     *        --adjust-vma=0x70006000 dump_preloader.bin > pre.dis
++     *    grep -n "800b0000\|800B0000" pre.dis
++     * 3. Transcribe the STR instructions as lcd_write_cmd/lcd_write_dat
++     *    calls below.
++     *
++     * The sequence will look something like:
++     *   lcd_write_cmd(0x01);   // software reset
++     *   msleep(120);
++     *   lcd_write_cmd(0x11);   // sleep out
++     *   msleep(120);
++     *   lcd_write_cmd(0x3A);   // pixel format
++     *   lcd_write_dat(0x55);   // RGB565
++     *   ... etc
++     *
++     * Common panels on MT6261 phones:
++     *   ILI9341  (most common at 240x320)
++     *   ST7789V
++     *   ILI9163C (128x160 — probably not this one at 240x320)
++     *
++     * The panel ID can be read back via CMD 0x04 (RDID).
++     */
++
++    /* Step 1: Assert LCD reset via GPIO */
++    gpio_out(LCD_RESET_GPIO, 0);
++    msleep(10);
++    gpio_out(LCD_RESET_GPIO, 1);
++    msleep(120);
++
++    /* Step 2: Configure MT6261 parallel LCD interface */
++    REG32(MT6261_LCD_BASE + LCD_PARALLEL_CFG) = LCD_PAR_16BIT;
++
++    /* Step 3: Panel-specific init — STUB, fill from dump */
++    /* ILI9341 init as placeholder — replace with real sequence */
++    lcd_write_cmd(0x01);            /* Software reset                       */
++    msleep(150);
++    lcd_write_cmd(0x11);            /* Sleep out                            */
++    msleep(120);
++    lcd_write_cmd(0x3A);            /* Pixel format set                     */
++    lcd_write_dat(0x55);            /* 16bpp RGB565                         */
++    lcd_write_cmd(0x36);            /* Memory access control                */
++    lcd_write_dat(0x48);            /* Row/col order for portrait 240x320   */
++    lcd_write_cmd(0x2A);            /* Column address set                   */
++    lcd_write_dat(0x00);
++    lcd_write_dat(0x00);
++    lcd_write_dat(0x00);
++    lcd_write_dat(0xEF);            /* 239 = width-1                        */
++    lcd_write_cmd(0x2B);            /* Page address set                     */
++    lcd_write_dat(0x00);
++    lcd_write_dat(0x00);
++    lcd_write_dat(0x01);
++    lcd_write_dat(0x3F);            /* 319 = height-1                       */
++    lcd_write_cmd(0x29);            /* Display on                           */
++    msleep(10);
++}
++
++/* ── Framebuffer DMA to panel ───────────────────────────────────────────── */
++
++static void lcd_flush(void)
++{
++    /*
++     * Set up MT6261 LCD DMA layer to blit the framebuffer to the panel.
++     * The MT6261 LCD controller can DMA directly from SRAM.
++     */
++
++    /* Set ROI (region of interest) = full screen */
++    REG32(MT6261_LCD_BASE + LCD_WROI_SIZE) =
++        (LCD_FB_WIDTH) | (LCD_FB_HEIGHT << 16);
++
++    /* Layer 0: source = framebuffer, RGB565, full width */
++    REG32(MT6261_LCD_BASE + LCD_LAYER0_SRC)     = LCD_FB_BASE;
++    REG32(MT6261_LCD_BASE + LCD_LAYER0_PITCHSZ) =
++        LCD_FB_STRIDE | (LCD_FB_WIDTH << 16);
++    REG32(MT6261_LCD_BASE + LCD_LAYER0_WINDOW)  = 0; /* x=0, y=0 */
++    REG32(MT6261_LCD_BASE + LCD_LAYER0_CTRL)    =
++        LCD_LAYER_RGB565 | LCD_LAYER_EN_BIT;
++    REG32(MT6261_LCD_BASE + LCD_LAYER_EN)       = 1; /* enable layer 0 */
++
++    /* Set write-to-panel command (ILI9341: 0x2C = RAMWR) */
++    lcd_write_cmd(0x2C);
++
++    /* Start DMA transfer */
++    REG32(MT6261_LCD_BASE + LCD_WROI_CTRL) = LCD_CTRL_START;
++
++    /* Wait for completion */
++    lcd_wait_ready();
++}
++
++/* ── Public API ─────────────────────────────────────────────────────────── */
++
++void mt6261_lcd_init(void)
++{
++    extern void uart_puts(const char *);
++    uart_puts("LCD: init 240x320 RGB565...\r\n");
++
++    /* Enable LCD clock */
++    REG32(MT6261_PDN_CLR0) = PDN0_LCD;
++
++    /* Enable backlight */
++    gpio_out(LCD_BL_GPIO, 1);
++
++    /* Hardware init */
++    mt6261_lcd_hw_init();
++
++    /* Clear framebuffer to black */
++    lcd_fill(LCD_COLOR_BLACK);
++
++    /* Flush to panel */
++    lcd_flush();
++
++    uart_puts("LCD: ready\r\n");
++}
++
++void lcd_fill(unsigned short color)
++{
++    int i;
++    for (i = 0; i < LCD_FB_WIDTH * LCD_FB_HEIGHT; i++)
++        fb[i] = color;
++    lcd_flush();
++}
++
++void lcd_putpixel(int x, int y, unsigned short color)
++{
++    if (x < 0 || x >= LCD_FB_WIDTH || y < 0 || y >= LCD_FB_HEIGHT)
++        return;
++    fb[y * LCD_FB_WIDTH + x] = color;
++}
++
++unsigned short lcd_getpixel(int x, int y)
++{
++    if (x < 0 || x >= LCD_FB_WIDTH || y < 0 || y >= LCD_FB_HEIGHT)
++        return 0;
++    return fb[y * LCD_FB_WIDTH + x];
++}
++
++void lcd_hline(int x, int y, int w, unsigned short color)
++{
++    int i;
++    for (i = 0; i < w; i++)
++        lcd_putpixel(x + i, y, color);
++}
++
++void lcd_vline(int x, int y, int h, unsigned short color)
++{
++    int i;
++    for (i = 0; i < h; i++)
++        lcd_putpixel(x, y + i, color);
++}
++
++void lcd_rect(int x, int y, int w, int h, unsigned short color)
++{
++    lcd_hline(x,     y,     w, color);
++    lcd_hline(x,     y+h-1, w, color);
++    lcd_vline(x,     y,     h, color);
++    lcd_vline(x+w-1, y,     h, color);
++}
++
++void lcd_fillrect(int x, int y, int w, int h, unsigned short color)
++{
++    int i, j;
++    for (j = y; j < y + h; j++)
++        for (i = x; i < x + w; i++)
++            lcd_putpixel(i, j, color);
++}
+diff --git a/arch/arm/mt6261/lcd.h b/arch/arm/mt6261/lcd.h
+new file mode 100644
+index 0000000..b364e71
+--- /dev/null
++++ b/arch/arm/mt6261/lcd.h
+@@ -0,0 +1,54 @@
++/* arch/arm/mt6261/lcd.h
++ * OpenPhone — MT6261 LCD driver interface
++ *
++ * Copyright (C) 2026 OpenPhone Project
++ * SPDX-License-Identifier: GPL-2.0-only
++ */
++
++#ifndef LCD_H
++#define LCD_H
++
++/* Panel geometry */
++#define LCD_WIDTH           240
++#define LCD_HEIGHT          320
++#define LCD_FB_BASE         0x70016800
++
++/* RGB565 color helpers */
++#define LCD_RGB(r,g,b)  ((((r)&0xF8)<<8)|(((g)&0xFC)<<3)|((b)>>3))
++#define LCD_COLOR_BLACK     LCD_RGB(  0,   0,   0)
++#define LCD_COLOR_WHITE     LCD_RGB(255, 255, 255)
++#define LCD_COLOR_RED       LCD_RGB(255,   0,   0)
++#define LCD_COLOR_GREEN     LCD_RGB(  0, 255,   0)
++#define LCD_COLOR_BLUE      LCD_RGB(  0,   0, 255)
++#define LCD_COLOR_CYAN      LCD_RGB(  0, 255, 255)
++#define LCD_COLOR_YELLOW    LCD_RGB(255, 255,   0)
++#define LCD_COLOR_ORANGE    LCD_RGB(255, 128,   0)
++#define LCD_COLOR_GRAY      LCD_RGB(128, 128, 128)
++/* OpenPhone brand color — teal */
++#define LCD_COLOR_OPENPHONE LCD_RGB(  0, 180, 180)
++
++/* Console colors */
++#define LCD_CON_BG          LCD_COLOR_BLACK
++#define LCD_CON_FG          LCD_COLOR_WHITE
++#define LCD_CON_BANNER_FG   LCD_COLOR_OPENPHONE
++#define LCD_CON_ERROR_FG    LCD_COLOR_RED
++#define LCD_CON_PROMPT_FG   LCD_COLOR_CYAN
++
++/* Init and basic ops */
++void mt6261_lcd_init(void);
++void lcd_fill(unsigned short color);
++void lcd_flush(void);
++void lcd_putpixel(int x, int y, unsigned short color);
++unsigned short lcd_getpixel(int x, int y);
++void lcd_hline(int x, int y, int w, unsigned short color);
++void lcd_vline(int x, int y, int h, unsigned short color);
++void lcd_rect(int x, int y, int w, int h, unsigned short color);
++void lcd_fillrect(int x, int y, int w, int h, unsigned short color);
++
++/* Console (font renderer) */
++void lcd_console_init(void);
++void lcd_console_putc(int c);
++void lcd_console_puts(const char *s);
++void lcd_console_clear(void);
++
++#endif /* LCD_H */
 diff --git a/arch/arm/mt6261/ldscript b/arch/arm/mt6261/ldscript
 new file mode 100644
 index 0000000..5ca58a6
@@ -795,10 +1444,10 @@ index 0000000..8de5bcb
 +}
 diff --git a/arch/arm/mt6261/mt6261.h b/arch/arm/mt6261/mt6261.h
 new file mode 100644
-index 0000000..f0c38d8
+index 0000000..a151065
 --- /dev/null
 +++ b/arch/arm/mt6261/mt6261.h
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,211 @@
 +/* arch/arm/mt6261/mt6261.h
 + * MediaTek MT6261 SoC register map
 + * Target: Gradiente Neo Flip 105A (GFP-105A)
@@ -862,6 +1511,7 @@ index 0000000..f0c38d8
 +/* PDN_CON0 clock gate bits (0 = clock on, 1 = clock off) */
 +#define PDN0_MSDC               (1 << 18)
 +#define PDN0_USB                (1 << 20)
++#define PDN0_LCD                (1 << 22)
 +#define PDN0_UART0              (1 << 24)
 +#define PDN0_UART1              (1 << 25)
 +
@@ -1270,10 +1920,10 @@ index 0000000..4c80409
 +    main()
 diff --git a/arch/arm/mt6261/uart.c b/arch/arm/mt6261/uart.c
 new file mode 100644
-index 0000000..bac3fbd
+index 0000000..2367a41
 --- /dev/null
 +++ b/arch/arm/mt6261/uart.c
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,185 @@
 +/* arch/arm/mt6261/uart.c
 + * MT6261 UART0 driver — 16550-compatible, 115200 8N1
 + * Used as primary console for OpenPhone/OpenBIOS
@@ -1372,51 +2022,66 @@ index 0000000..bac3fbd
 +    }
 +}
 +
-+/* ── OpenBIOS console ops — dual UART + USB CDC ──────────────────────────
++/* ── OpenBIOS console ops — triple: UART + USB CDC + LCD ─────────────────
 + *
-+ * On boot, Stage 1 tries USB first (waits 2 seconds for host to
-+ * configure). If no host connects, falls back to UART0.
-+ * Once a console is chosen it stays for the session.
++ * Boot sequence:
++ *   1. UART always on (first output)
++ *   2. LCD init — shows banner, becomes secondary output always
++ *   3. USB CDC — wait 2s for host; if connected becomes primary input
++ *      If no USB, UART is primary input
++ *
++ * Output always goes to both LCD and the active serial console.
++ * Input comes from whichever serial console is active.
 + */
 +
 +#ifdef CONFIG_DEBUG_CONSOLE
 +
 +#include "usb_cdc.h"
++#include "lcd.h"
 +
 +typedef enum {
 +    CONSOLE_UART = 0,
 +    CONSOLE_USB  = 1,
-+    CONSOLE_AUTO = 2,   /* not yet decided                                  */
-+} console_mode_t;
++} serial_mode_t;
 +
-+static console_mode_t console_mode = CONSOLE_AUTO;
++static serial_mode_t serial_mode = CONSOLE_UART;
 +
 +void console_autodetect(void)
 +{
 +    unsigned int i;
 +
++    /* Always init LCD — output goes there regardless of serial choice */
++    mt6261_lcd_init();
++    lcd_console_init();
++    lcd_console_puts("OpenPhone OpenBIOS\n");
++
++    /* Try USB */
 +    mt6261_usb_init();
 +    uart_puts("Console: waiting for USB host (2s)...\r\n");
++    lcd_console_puts("Waiting for USB...\n");
 +
-+    /* Wait up to 2 seconds for USB SET_CONFIGURATION */
 +    for (i = 0; i < 200000; i++) {
 +        mt6261_usb_irq();
 +        if (usb_cdc_configured()) {
-+            console_mode = CONSOLE_USB;
++            serial_mode = CONSOLE_USB;
 +            uart_puts("Console: USB CDC ACM\r\n");
++            lcd_console_puts("Console: USB CDC ACM\n");
 +            return;
 +        }
-+        /* Rough 10µs delay */
 +        volatile int d = 1000; while (d--) ;
 +    }
 +
-+    console_mode = CONSOLE_UART;
++    serial_mode = CONSOLE_UART;
 +    uart_puts("Console: UART0 115200 8N1\r\n");
++    lcd_console_puts("Console: UART0 115200\n");
 +}
 +
 +static int arch_putchar(int c)
 +{
-+    if (console_mode == CONSOLE_USB)
++    /* Always output to LCD */
++    lcd_console_putc(c);
++    /* And to active serial console */
++    if (serial_mode == CONSOLE_USB)
 +        usb_cdc_putc(c);
 +    else
 +        uart_putc(c);
@@ -1425,14 +2090,14 @@ index 0000000..bac3fbd
 +
 +static int arch_availchar(void)
 +{
-+    if (console_mode == CONSOLE_USB)
++    if (serial_mode == CONSOLE_USB)
 +        return usb_cdc_tstc();
 +    return uart_tstc();
 +}
 +
 +static int arch_getchar(void)
 +{
-+    if (console_mode == CONSOLE_USB)
++    if (serial_mode == CONSOLE_USB)
 +        return usb_cdc_getc();
 +    return uart_getc();
 +}
