@@ -1,0 +1,284 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * mt6261-gfp105a.dts
+ * Device Tree Source for Gradiente Neo Flip 105A (GFP-105A)
+ * SoC: MediaTek MT6261 (ARM7EJ-S, no MMU)
+ * Target: uClinux (nommu kernel), loaded from SD card by OpenPhone
+ *
+ * Copyright (C) 2026 OpenPhone Project
+ *
+ * Boot flow:
+ *   NOR Flash → OpenPhone Stage 1 (ARM asm shim)
+ *             → OpenBIOS (Forth environment, loaded from SD)
+ *             → kernel + DTB + initramfs (all loaded from SD by OpenBIOS)
+ *             → uClinux boots in SRAM
+ *
+ * SD card layout (sectors):
+ *   1    - 255    OpenBIOS image
+ *   2048 - 4095   uClinux kernel (uImage or flat binary)
+ *   4096 - 4351   This DTB (compiled)
+ *   4352 - 8191   initramfs
+ *   8192+         FAT32 or ext2 root filesystem partition
+ *
+ * OpenPhone Forth to load and boot:
+ *   ok  2048 0x70000000 msdc-read-sector drop   \ load kernel
+ *   ok  4096 0x70008000 msdc-read-sector drop   \ load DTB
+ *   ok  0x70000000 execute                      \ jump to kernel
+ *
+ * Memory layout at boot (256KB SRAM total):
+ *   0x70000000  Kernel load address
+ *   0x70008000  DTB
+ *   0x70010000  initramfs (if small enough)
+ *   0x70016800  LCD framebuffer (150KB, DO NOT use for RAM)
+ *   0x7003FFFC  Top of SRAM / stack
+ *
+ * Usable RAM for kernel+heap: ~90KB (below framebuffer)
+ * For a practical system use XIP cramfs or romfs on the SD card.
+ */
+
+/dts-v1/;
+
+/ {
+	model = "Gradiente Neo Flip 105A";
+	compatible = "gradiente,gfp105a", "mediatek,mt6261";
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	/* ── CPU ─────────────────────────────────────────────────────── */
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,arm7ej-s", "arm,armv4t";
+			reg = <0>;
+			clock-frequency = <104000000>;
+			/* No MMU — uClinux flat memory model */
+			mmu-type = "none";
+		};
+	};
+
+	/* ── Clocks ──────────────────────────────────────────────────── */
+
+	clk26m: oscillator {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <26000000>;
+		clock-output-names = "clk26m";
+	};
+
+	/* ── Memory ──────────────────────────────────────────────────── */
+
+	/*
+	 * 256KB internal SRAM at 0x70000000.
+	 * Top 150KB reserved for LCD framebuffer by OpenPhone before
+	 * handing off to the kernel — kernel must not touch that region.
+	 * Usable: 0x70000000 - 0x70016800 = ~90KB
+	 */
+	memory@70000000 {
+		device_type = "memory";
+		/* 90KB usable — framebuffer sits above this */
+		reg = <0x70000000 0x00016800>;
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/* LCD framebuffer — set up by OpenPhone, must not be reused */
+		lcd_fb: framebuffer@70016800 {
+			compatible = "shared-dma-pool";
+			reg = <0x70016800 0x00025800>; /* 150KB */
+			no-map;
+			label = "lcd-framebuffer";
+		};
+	};
+
+	/* ── SoC peripherals ─────────────────────────────────────────── */
+
+	soc {
+		compatible = "simple-bus";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/* ── UART0 — primary console ──────────────────────── */
+		uart0: serial@80030000 {
+			compatible = "mediatek,mt6261-uart", "ns16550a";
+			reg = <0x80030000 0x100>;
+			reg-shift = <2>;
+			reg-io-width = <4>;
+			clocks = <&clk26m>;
+			clock-frequency = <26000000>;
+			current-speed = <115200>;
+			status = "okay";
+		};
+
+		/* ── UART1 ────────────────────────────────────────── */
+		uart1: serial@80040000 {
+			compatible = "mediatek,mt6261-uart", "ns16550a";
+			reg = <0x80040000 0x100>;
+			reg-shift = <2>;
+			reg-io-width = <4>;
+			clocks = <&clk26m>;
+			clock-frequency = <26000000>;
+			status = "disabled";
+		};
+
+		/* ── MSDC — SD card (loaded kernel from here) ─────── */
+		mmc0: mmc@80050000 {
+			compatible = "mediatek,mt6261-msdc";
+			reg = <0x80050000 0x1000>;
+			clocks = <&clk26m>;
+			clock-names = "source";
+			bus-width = <4>;
+			max-frequency = <26000000>;
+			cap-sd-highspeed;
+			no-sdio;
+			/*
+			 * OpenPhone already initialised the SD card before
+			 * jumping to the kernel. The kernel driver just needs
+			 * to reinitialise for normal I/O (root filesystem).
+			 */
+			status = "okay";
+		};
+
+		/* ── USB — CDC ACM console / networking ───────────── */
+		usb0: usb@80060000 {
+			compatible = "mediatek,mt6261-musb", "mentor,musb";
+			reg = <0x80060000 0x1000>;
+			clocks = <&clk26m>;
+			dr_mode = "peripheral";
+			/*
+			 * OpenPhone configures USB as CDC ACM before boot.
+			 * The kernel can inherit this as /dev/ttyACM0 or
+			 * reinitialise for USB networking (CDC Ethernet).
+			 */
+			status = "okay";
+		};
+
+		/* ── GPIO ─────────────────────────────────────────── */
+		gpio: gpio@80020000 {
+			compatible = "mediatek,mt6261-gpio";
+			reg = <0x80020000 0x1000>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			gpio-ranges = <&gpio 0 0 128>;
+		};
+
+		/* ── I2C ──────────────────────────────────────────── */
+		i2c0: i2c@80060000 {
+			compatible = "mediatek,mt6261-i2c";
+			reg = <0x80060000 0x1000>;
+			clocks = <&clk26m>;
+			clock-frequency = <100000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+		};
+
+		/* ── RTC ──────────────────────────────────────────── */
+		rtc: rtc@80090000 {
+			compatible = "mediatek,mt6261-rtc";
+			reg = <0x80090000 0x1000>;
+			status = "okay";
+		};
+
+		/* ── PWM — backlight control ──────────────────────── */
+		pwm: pwm@800a0000 {
+			compatible = "mediatek,mt6261-pwm";
+			reg = <0x800a0000 0x1000>;
+			clocks = <&clk26m>;
+			#pwm-cells = <2>;
+			status = "okay";
+		};
+
+		/* ── LCD controller ───────────────────────────────── */
+		lcd: lcd@800b0000 {
+			compatible = "mediatek,mt6261-lcd";
+			reg = <0x800b0000 0x1000>;
+			clocks = <&clk26m>;
+			/*
+			 * Framebuffer already set up by OpenPhone.
+			 * Kernel FB driver can take over directly —
+			 * no re-init needed if panel is already on.
+			 */
+			memory-region = <&lcd_fb>;
+			status = "okay";
+
+			panel {
+				compatible = "ilitek,ili9341", "panel-parallel";
+				reset-gpios = <&gpio 47 1>;
+				backlight = <&backlight>;
+				width-mm  = <36>;
+				height-mm = <48>;
+
+				display-timings {
+					native-mode = <&timing0>;
+					timing0: timing {
+						clock-frequency = <6000000>;
+						hactive         = <240>;
+						vactive         = <320>;
+						hback-porch     = <10>;
+						hfront-porch    = <10>;
+						hsync-len       = <1>;
+						vback-porch     = <4>;
+						vfront-porch    = <4>;
+						vsync-len       = <1>;
+					};
+				};
+			};
+		};
+	};
+
+	/* ── Backlight ───────────────────────────────────────────────── */
+
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&pwm 0 1000000>;
+		brightness-levels = <0 16 32 64 128 192 255>;
+		default-brightness-level = <4>;
+		power-supply = <&vcc_3v3>;
+	};
+
+	/* ── Regulators ──────────────────────────────────────────────── */
+
+	vcc_3v3: regulator-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+	};
+
+	/* ── Chosen ──────────────────────────────────────────────────── */
+
+	chosen {
+		/*
+		 * Kernel console: UART0 at 115200
+		 * Root: SD card partition 1 (FAT32 or ext2)
+		 * mem=90k: stay below LCD framebuffer
+		 *
+		 * For a readonly cramfs/romfs root on SD:
+		 *   root=/dev/mmcblk0p1 rootfstype=cramfs ro
+		 *
+		 * For initramfs-only (no SD root needed after boot):
+		 *   root=/dev/ram0 rdinit=/sbin/init
+		 */
+		bootargs = "console=ttyMTK0,115200n8 root=/dev/mmcblk0p1 rootfstype=ext2 rw mem=90k";
+		stdout-path = "serial0:115200n8";
+	};
+
+	/* ── Aliases ─────────────────────────────────────────────────── */
+
+	aliases {
+		serial0 = &uart0;
+		serial1 = &uart1;
+		mmc0    = &mmc0;
+		i2c0    = &i2c0;
+		rtc0    = &rtc;
+	};
+};

@@ -682,41 +682,75 @@ index 0000000..c2e834b
 +    .end
 diff --git a/arch/arm/mt6261/init.fs b/arch/arm/mt6261/init.fs
 new file mode 100644
-index 0000000..bec5172
+index 0000000..f4e8632
 --- /dev/null
 +++ b/arch/arm/mt6261/init.fs
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,66 @@
 +\ arch/arm/mt6261/init.fs
 +\ OpenPhone — MT6261 OpenBIOS initialisation Forth
 +\
 +\ Copyright (C) 2026 OpenPhone Project
 +\ SPDX-License-Identifier: GPL-2.0-only
 +\
-+\ Called by the OpenBIOS core after the Forth kernel is running.
-+\ Sets up the /chosen paths and OpenFirmware environment.
++\ Called after the Forth kernel is running.
++\ Completes console setup and prints the OpenPhone banner.
 +
 +." OpenPhone initialising..." cr
 +
-+\ Set up stdin/stdout to use UART
-+" /uart@80030000" open-dev
-+dup " stdin"  chosen-set
-+dup " stdout" chosen-set
-+drop
++\ ── Console setup ───────────────────────────────────────────────────────────
++\ Primary output: LCD framebuffer (always on)
++\ Primary input:  USB CDC ACM if host connected, else UART0
 +
-+\ Set default boot device to SD card
-+" /msdc@80050000:1" " bootpath" chosen-set
++\ Open LCD as stdout
++" /lcd@800b0000" find-dev
++if
++    dup " stdout" chosen-set
++    open-dev drop
++then
 +
-+\ Set model string
-+" Gradiente Neo Flip 105A" " model" chosen-set
++\ Open UART as stdin (USB is wired at C level via console_autodetect)
++" /uart@80030000" find-dev
++if
++    dup " stdin" chosen-set
++    open-dev drop
++then
++
++\ ── Boot configuration ───────────────────────────────────────────────────────
++
++\ Default boot: load from SD card sector 1
++" /msdc@80050000:1"       " bootpath"   chosen-set
++" "                       " bootargs"   chosen-set
++
++\ Model strings
++" Gradiente Neo Flip 105A" " model"       chosen-set
 +" OpenPhone GFP-105A"      " banner-name" chosen-set
 +
-+\ Print the OpenFirmware banner
++\ ── OpenPhone banner ─────────────────────────────────────────────────────────
++
++lcd-prompt-color
 +cr
-+." OpenPhone OpenBIOS v0.1" cr
++." ╔══════════════════════════════╗" cr
++." ║   OpenPhone OpenBIOS v0.1   ║" cr
++." ║   GFP-105A / MT6261         ║" cr
++." ╚══════════════════════════════╝" cr
++lcd-normal-color
++cr
 +." Copyright (C) 2026 OpenPhone Project" cr
-+." Based on OpenBIOS -- https://openbios.org/" cr
++." Based on OpenBIOS  https://openbios.org/" cr
 +cr
-+." GFP-105A / MediaTek MT6261 / WD031 SS V00" cr
++." Board:  Gradiente Neo Flip 105A (WD031 SS V00)" cr
++." SoC:    MediaTek MT6261 @ 104MHz  ARM7EJ-S" cr
++." SRAM:   256KB  NOR: 4MB  LCD: 240x320 RGB565" cr
++cr
++
++\ ── Show active console ──────────────────────────────────────────────────────
++.console
++cr
++
++\ ── Hint ─────────────────────────────────────────────────────────────────────
++." Type  .sysinfo   for hardware summary" cr
++." Type  sd-boot    to boot from SD card" cr
++." Type  words      to list all Forth words" cr
 +cr
 diff --git a/arch/arm/mt6261/lcd.c b/arch/arm/mt6261/lcd.c
 new file mode 100644
@@ -1661,19 +1695,16 @@ index 0000000..a151065
 +#endif /* MT6261_H */
 diff --git a/arch/arm/mt6261/openbios.c b/arch/arm/mt6261/openbios.c
 new file mode 100644
-index 0000000..a01aa0a
+index 0000000..da002a6
 --- /dev/null
 +++ b/arch/arm/mt6261/openbios.c
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,216 @@
 +/* arch/arm/mt6261/openbios.c
 + * OpenPhone — OpenBIOS main entry for MT6261/GFP-105A
++ * Complete OpenFirmware device tree for all on-board peripherals.
 + *
 + * Copyright (C) 2026 OpenPhone Project
 + * SPDX-License-Identifier: GPL-2.0-only
-+ *
-+ * This is the C entry point called from entry.S after UART and MSDC
-+ * are initialised. It sets up the OpenBIOS/OpenFirmware environment
-+ * and drops into the interactive Forth shell over UART0.
 + */
 +
 +#include "config.h"
@@ -1685,10 +1716,11 @@ index 0000000..a01aa0a
 +#include "drivers/drivers.h"
 +#include "kernel/kernel.h"
 +#include "mt6261.h"
++#include "lcd.h"
 +
-+/* Forward declarations */
 +void mt6261_uart_init(void);
 +void mt6261_devices_init(void);
++extern void uart_puts(const char *);
 +
 +/* ── System info ────────────────────────────────────────────────────────── */
 +
@@ -1696,57 +1728,159 @@ index 0000000..a01aa0a
 +
 +static void collect_sys_info(struct sys_info *si)
 +{
-+    si->membase    = MT6261_SRAM_BASE;
-+    si->memsize    = MT6261_SRAM_SIZE;
-+    si->cpu_hz     = 104000000; /* 104 MHz */
-+    si->bus_hz     = 26000000;  /* 26 MHz crystal */
-+    si->baudrate   = 115200;
++    si->membase  = MT6261_SRAM_BASE;
++    si->memsize  = MT6261_SRAM_SIZE;
++    si->cpu_hz   = 104000000;
++    si->bus_hz   = 26000000;
++    si->baudrate = 115200;
 +}
 +
-+/* ── Device tree setup ──────────────────────────────────────────────────── */
++/* ── Helper: new OF node with reg property ──────────────────────────────── */
++
++static phandle_t new_mmio_dev(const char *name, const char *compat,
++                               phandle_t parent, unsigned int base)
++{
++    phandle_t ph = new_device(name, compat, parent);
++    set_property(ph, "reg",        (char *)&base,   4);
++    set_property(ph, "compatible", (char *)compat,  strlen(compat) + 1);
++    return ph;
++}
++
++/* ── Complete OpenFirmware device tree ──────────────────────────────────── */
 +
 +static void mt6261_build_device_tree(void)
 +{
-+    phandle_t chosen, uart, msdc, memory;
++    phandle_t root, chosen, cpus, cpu0;
++    phandle_t memory, uart0, uart1, msdc, usb, lcd, gpio, i2c, rtc, pwm;
++    unsigned int tmp[4];
++    unsigned int reg;
 +
-+    /* /chosen */
++    root   = find_dev("/");
 +    chosen = find_dev("/chosen");
 +    if (!chosen)
-+        chosen = new_property(find_dev("/"), "chosen", NULL, 0);
++        chosen = new_device("chosen", "chosen", root);
 +
-+    /* /memory */
++    /* ── / root properties ── */
++    set_property(root, "model",      "Gradiente Neo Flip 105A",   24);
++    set_property(root, "compatible", "gradiente,gfp105a",         17);
++    tmp[0] = 1; set_property(root, "#address-cells", (char *)tmp, 4);
++    tmp[0] = 1; set_property(root, "#size-cells",    (char *)tmp, 4);
++
++    /* ── /cpus ── */
++    cpus = new_device("cpus", "cpus", root);
++    tmp[0] = 1; set_property(cpus, "#address-cells", (char *)tmp, 4);
++    tmp[0] = 0; set_property(cpus, "#size-cells",    (char *)tmp, 4);
++
++    cpu0 = new_device("cpu@0", "cpu", cpus);
++    set_property(cpu0, "device_type",  "cpu",             4);
++    set_property(cpu0, "compatible",   "arm,arm7ej-s",   14);
++    tmp[0] = 0; set_property(cpu0, "reg", (char *)tmp, 4);
++    tmp[0] = 104000000;
++    set_property(cpu0, "clock-frequency", (char *)tmp, 4);
++    tmp[0] = 26000000;
++    set_property(cpu0, "bus-frequency",   (char *)tmp, 4);
++
++    /* ── /memory ── */
 +    memory = find_dev("/memory");
-+    if (!memory) {
-+        memory = new_device("memory", "memory", find_dev("/"));
-+        /* reg = <base size> */
-+        unsigned int mem_reg[2] = {
-+            MT6261_SRAM_BASE,
-+            MT6261_SRAM_SIZE,
-+        };
-+        set_property(memory, "reg", (char *)mem_reg, sizeof(mem_reg));
-+    }
++    if (!memory)
++        memory = new_device("memory", "memory", root);
++    set_property(memory, "device_type", "memory", 7);
++    tmp[0] = MT6261_SRAM_BASE;
++    tmp[1] = MT6261_SRAM_SIZE;
++    set_property(memory, "reg", (char *)tmp, 8);
 +
-+    /* /uart@80030000 */
-+    uart = new_device("uart", "ns16550", find_dev("/"));
-+    {
-+        unsigned int reg = MT6261_UART0_BASE;
-+        set_property(uart, "reg",           (char *)&reg, 4);
-+        set_property(uart, "compatible",    "ns16550a", 9);
-+        unsigned int clk = 26000000;
-+        set_property(uart, "clock-frequency", (char *)&clk, 4);
-+        unsigned int baud = 115200;
-+        set_property(uart, "current-speed",   (char *)&baud, 4);
-+        set_property(chosen, "stdin",  "uart", 5);
-+        set_property(chosen, "stdout", "uart", 5);
-+    }
++    /* ── /chosen ── */
++    set_property(chosen, "bootargs",    "",                          1);
++    set_property(chosen, "bootpath",    "/msdc@80050000:1",         18);
++    set_property(chosen, "model",       "Gradiente Neo Flip 105A",  24);
++    set_property(chosen, "banner-name", "OpenPhone GFP-105A",       19);
 +
-+    /* /msdc@80050000 */
-+    msdc = new_device("msdc", "mtk,mt6261-msdc", find_dev("/"));
-+    {
-+        unsigned int reg = MT6261_MSDC_BASE;
-+        set_property(msdc, "reg",        (char *)&reg, 4);
-+        set_property(msdc, "compatible", "mtk,mt6261-msdc", 17);
-+    }
++    /* ── /uart@80030000 (UART0 — primary console) ── */
++    uart0 = new_mmio_dev("uart@80030000", "ns16550a", root,
++                          MT6261_UART0_BASE);
++    tmp[0] = 26000000;
++    set_property(uart0, "clock-frequency", (char *)tmp, 4);
++    tmp[0] = 115200;
++    set_property(uart0, "current-speed",   (char *)tmp, 4);
++    tmp[0] = 1;
++    set_property(uart0, "reg-shift",       (char *)tmp, 4);
++    set_property(uart0, "device_type",     "serial",     7);
++
++    /* ── /uart@80040000 (UART1) ── */
++    uart1 = new_mmio_dev("uart@80040000", "ns16550a", root,
++                          MT6261_UART1_BASE);
++    tmp[0] = 26000000;
++    set_property(uart1, "clock-frequency", (char *)tmp, 4);
++    set_property(uart1, "device_type",     "serial",     7);
++
++    /* ── /msdc@80050000 (SD/MMC controller) ── */
++    msdc = new_mmio_dev("msdc@80050000", "mtk,mt6261-msdc", root,
++                         MT6261_MSDC_BASE);
++    set_property(msdc, "device_type", "mmc", 4);
++    tmp[0] = 26000000;
++    set_property(msdc, "clock-frequency", (char *)tmp, 4);
++    tmp[0] = 512;
++    set_property(msdc, "block-size", (char *)tmp, 4);
++    tmp[0] = 0; tmp[1] = 0;
++    set_property(msdc, "bus-width", (char *)tmp, 4);  /* 4-bit */
++
++    /* ── /usb@80060000 (MUSB-compatible USB controller) ── */
++    usb = new_mmio_dev("usb@80060000", "mtk,mt6261-musb", root,
++                        MT6261_USB_BASE);
++    set_property(usb, "device_type", "usb",      4);
++    tmp[0] = 0;  /* peripheral mode */
++    set_property(usb, "dr_mode",     "peripheral", 11);
++    set_property(usb, "phys",        "musb-phy",    9);
++
++    /* ── /lcd@800b0000 (LCD controller) ── */
++    lcd = new_mmio_dev("lcd@800b0000", "mtk,mt6261-lcd", root,
++                        MT6261_LCD_BASE);
++    tmp[0] = LCD_WIDTH;
++    set_property(lcd, "width",  (char *)tmp, 4);
++    tmp[0] = LCD_HEIGHT;
++    set_property(lcd, "height", (char *)tmp, 4);
++    tmp[0] = 16;
++    set_property(lcd, "depth",  (char *)tmp, 4);
++    tmp[0] = LCD_FB_BASE;
++    tmp[1] = LCD_FB_SIZE;
++    set_property(lcd, "framebuffer", (char *)tmp, 8);
++    set_property(lcd, "panel",       "ili9341-compatible", 20);
++    set_property(lcd, "device_type", "display",             8);
++
++    /* ── /gpio@80020000 ── */
++    gpio = new_mmio_dev("gpio@80020000", "mtk,mt6261-gpio", root,
++                         MT6261_GPIO_BASE);
++    tmp[0] = 128;  /* MT6261 has 128 GPIO pins */
++    set_property(gpio, "gpio-count",       (char *)tmp, 4);
++    tmp[0] = 2;
++    set_property(gpio, "#gpio-cells",      (char *)tmp, 4);
++    set_property(gpio, "gpio-controller",  NULL,         0);
++
++    /* ── /i2c@80060000 ── */
++    i2c = new_mmio_dev("i2c@80060000", "mtk,mt6261-i2c", root,
++                        MT6261_I2C_BASE);
++    tmp[0] = 100000;  /* 100kHz standard mode */
++    set_property(i2c, "clock-frequency", (char *)tmp, 4);
++    tmp[0] = 1; set_property(i2c, "#address-cells", (char *)tmp, 4);
++    tmp[0] = 0; set_property(i2c, "#size-cells",    (char *)tmp, 4);
++
++    /* ── /rtc@80090000 ── */
++    rtc = new_mmio_dev("rtc@80090000", "mtk,mt6261-rtc", root,
++                        MT6261_RTC_BASE);
++    set_property(rtc, "device_type", "rtc", 4);
++
++    /* ── /pwm@800a0000 (backlight) ── */
++    pwm = new_mmio_dev("pwm@800a0000", "mtk,mt6261-pwm", root,
++                        MT6261_PWM_BASE);
++    tmp[0] = 26000000;
++    set_property(pwm, "clock-frequency", (char *)tmp, 4);
++
++    /* ── Wire up /chosen console paths ── */
++    /* stdin/stdout: prefer LCD+USB, fall back to UART */
++    set_property(chosen, "stdin",  "/uart@80030000", 16);
++    set_property(chosen, "stdout", "/lcd@800b0000",  14);
++
++    uart_puts("OF device tree built\r\n");
 +}
 +
 +/* ── OpenBIOS arch hooks ─────────────────────────────────────────────────── */
@@ -1760,7 +1894,6 @@ index 0000000..a01aa0a
 +
 +void arch_of_init(void)
 +{
-+    /* Called after Forth kernel is up */
 +    mt6261_devices_init();
 +}
 +
@@ -1768,28 +1901,19 @@ index 0000000..a01aa0a
 +
 +void openphone_main(void)
 +{
-+    /* UART is already up from entry.S — use it until USB is ready */
 +    uart_puts("\r\nOpenPhone OpenBIOS\r\n");
 +    uart_puts("GFP-105A / MT6261 / WD031\r\n\r\n");
 +
-+    /* Auto-detect console: USB CDC ACM preferred, UART fallback */
 +    extern void console_autodetect(void);
 +    console_autodetect();
 +
-+    /* Initialise OpenBIOS core */
 +    collect_sys_info(&mt6261_sys_info);
 +    openbios_init();
-+
-+    /* Build device tree */
 +    mt6261_build_device_tree();
-+
-+    /* Hand off to OpenFirmware Forth interpreter */
 +    openbios();
 +
-+    /* Should never return */
 +    uart_puts("\r\n*** OpenBIOS returned ***\r\n");
-+    for (;;)
-+        ;
++    for (;;) ;
 +}
 diff --git a/arch/arm/mt6261/pack_gfh.py b/arch/arm/mt6261/pack_gfh.py
 new file mode 100644

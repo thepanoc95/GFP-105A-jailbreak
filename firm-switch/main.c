@@ -266,9 +266,6 @@ static int usb_recv(usbio_t *io, int want)
     return got;
 }
 
-/* ── MTK echo protocol ──────────────────────────────────────────────────── */
-
-/* Send data and verify BROM echoes it back */
 static void mtk_echo(usbio_t *io, const void *data, int len)
 {
     const uint8_t *ptr = (const uint8_t *)data;
@@ -317,15 +314,12 @@ static uint32_t mtk_recv32(usbio_t *io)
     return R32BE(io->buf);
 }
 
-/* Read status word — must be 0x0000 */
 static void mtk_check_status(usbio_t *io)
 {
     uint16_t st = mtk_recv16(io);
     if (st != 0x0000)
         ERR_EXIT("BROM error status: 0x%04x\n", st);
 }
-
-/* ── BROM handshake ─────────────────────────────────────────────────────── */
 
 static void mtk_handshake(usbio_t *io)
 {
@@ -349,8 +343,6 @@ static void mtk_handshake(usbio_t *io)
     OK("Handshake OK\n");
 }
 
-/* ── Chip identification ────────────────────────────────────────────────── */
-
 static uint16_t mtk_get_hw_code(usbio_t *io)
 {
     mtk_echo8(io, CMD_GET_HW_CODE);
@@ -361,7 +353,6 @@ static uint16_t mtk_get_hw_code(usbio_t *io)
 
 static void mtk_disable_watchdog(usbio_t *io)
 {
-    /* MT6261 watchdog at 0xa0030000, write 0x2200 to disable */
     mtk_echo8(io,  CMD_WRITE16);
     mtk_echo32(io, 0xa0030000);
     mtk_echo32(io, 1);
@@ -369,8 +360,6 @@ static void mtk_disable_watchdog(usbio_t *io)
     mtk_echo16(io, 0x2200);
     mtk_check_status(io);
 }
-
-/* ── NOR flash helpers (via BROM memory-mapped access) ──────────────────── */
 
 static uint32_t mtk_read32(usbio_t *io, uint32_t addr)
 {
@@ -392,8 +381,6 @@ static void mtk_write16(usbio_t *io, uint32_t addr, uint16_t val)
     mtk_echo16(io, val);
     mtk_check_status(io);
 }
-
-/* ── GFH header validation ──────────────────────────────────────────────── */
 
 typedef struct {
     uint32_t magic;         /* 0x014d4d4d                                   */
@@ -436,8 +423,6 @@ static int validate_gfh(const uint8_t *buf, size_t size, gfh_t *out)
     return 1;
 }
 
-/* ── Checksum (16-bit XOR, same as BROM uses) ───────────────────────────── */
-
 static uint16_t calc_checksum(const uint8_t *buf, size_t size)
 {
     uint32_t chk = 0;
@@ -447,8 +432,6 @@ static uint16_t calc_checksum(const uint8_t *buf, size_t size)
     if (size & 1) chk ^= buf[i];
     return (uint16_t)chk;
 }
-
-/* ── Progress bar ───────────────────────────────────────────────────────── */
 
 static void print_progress(const char *label, uint32_t done, uint32_t total)
 {
@@ -461,8 +444,6 @@ static void print_progress(const char *label, uint32_t done, uint32_t total)
             pct, done / 1024, total / 1024);
     if (done >= total) fputc('\n', stderr);
 }
-
-/* ── NOR flash read (for verify) ────────────────────────────────────────── */
 
 static void nor_read(usbio_t *io, uint32_t addr, uint8_t *dst, uint32_t size)
 {
