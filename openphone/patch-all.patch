@@ -2157,3 +2157,229 @@ index 0000000..e879b1d
 +
 +  <!-- No QEMU on real hardware -->
 +  <option name="CONFIG_LINUXBIOS"  type="boolean" value="false"/>
+diff --git a/config/scripts/switch-arch b/config/scripts/switch-arch
+index 013116b..f33f963 100755
+--- a/config/scripts/switch-arch
++++ b/config/scripts/switch-arch
+@@ -8,11 +8,12 @@ MOLPATH=$HOME/mol-0.9.71
+ if [ x"$1" = x -o "$1" = "-help" ]; then
+   printf "Usage:\n  $0 [arch-config]...\n"
+   printf "arch-config values supported for native or cross compiled builds:\n"
+-  printf " amd64, ppc, sparc32, sparc64, x86\n\n"
++  printf " amd64, arm_mt6261, ppc, sparc32, sparc64, x86\n\n"
+   printf "Add \"unix-\" prefix to compile openbios-unix executable (native only)\n"
+   printf "Add \"builtin-\" prefix to compile openbios-builtin executables\n\n"
+   printf "Without prefixes, builtin and unix targets are selected\n\n"
+   printf "Special targets: mol-ppc briq-ppc pearpc-ppc qemu-ppc qemu-ppc64 xbox-x86\n\n"
++  printf "ARM targets: arm_mt6261 (Gradiente Neo Flip 105A / MT6261)\n\n"
+   printf "Example: $0 builtin-sparc32 unix-amd64 builtin-amd64\n"
+   exit 0
+ fi
+@@ -52,6 +53,9 @@ basearch()
+     powerpc|ppc64|powerpc64)
+         echo ppc
+         ;;
++    arm_mt6261)
++        echo arm
++        ;;
+     *)
+         echo $arch
+         ;;
+@@ -168,7 +172,7 @@ fi
+ target_list=""
+ for target in $*; do
+     case $target in
+-        unix-*|builtin-*|plain-*|mol-ppc|briq-ppc|pearpc-ppc|qemu-ppc|qemu-ppc64|xbox-x86)
++        unix-*|builtin-*|plain-*|mol-ppc|briq-ppc|pearpc-ppc|qemu-ppc|qemu-ppc64|xbox-x86|arm_mt6261)
+         target_list="$target_list $target"
+         ;;
+         cross-*)
+@@ -204,6 +208,7 @@ for ARCH in $arch_list; do
+     pearpc="no"
+     qemu="no"
+     xbox="no"
++    arm_mt6261="no"
+     cross="no"
+ 
+     for target in $target_list; do
+@@ -231,6 +236,9 @@ for ARCH in $arch_list; do
+             xbox-x86)
+             xbox="yes"
+             ;;
++            arm_mt6261)
++            arm_mt6261="yes"
++            ;;
+             builtin-sparc32)
+             builtin="yes"
+             qemu="yes"
+@@ -299,6 +307,12 @@ for ARCH in $arch_list; do
+         CFLAGS="-fno-builtin -m32 -fno-stack-protector -fno-pic"
+         AS_FLAGS="-Wa,-32"
+         ;;
++
++        arm|arm_mt6261)
++        select_prefix arm-none-eabi arm-linux-gnueabi arm-linux-gnueabihf
++        CFLAGS="-march=armv4t -mthumb-interwork -msoft-float -fno-builtin -fno-stack-protector -fno-pic -ffreestanding"
++        AS_FLAGS="-march=armv4t -mthumb-interwork"
++        ;;
+     esac
+     if [ "$ARCH" != "$HOSTARCH" -o `uname -s` = "Darwin" ]; then
+         cross="yes"
+@@ -330,7 +344,13 @@ for ARCH in $arch_list; do
+     mkdir -p $OBJDIR/host/include
+     mkdir -p $OBJDIR/host/kernel
+     mkdir -p $OBJDIR/forth
+-    ln -s  $SRCDIR/include/arch/$BASEARCH $OBJDIR/target/include/asm
++    if [ "$BASEARCH" = "arm" ]; then
++        # ARM include dir — create if not present yet
++        mkdir -p $SRCDIR/include/arch/arm
++        ln -s  $SRCDIR/include/arch/arm $OBJDIR/target/include/asm
++    else
++        ln -s  $SRCDIR/include/arch/$BASEARCH $OBJDIR/target/include/asm
++    fi
+     #compile the host binary with target settings instead
+     #ln -s $SRCDIR/include/arch/$HOSTARCH $OBJDIR/host/include/asm
+     if [ "$mol" = "yes" ]; then
+@@ -358,6 +378,9 @@ for ARCH in $arch_list; do
+     if [ "$xbox" = "yes" ]; then
+         mkdir -p $OBJDIR/target/arch/x86/xbox
+     fi
++    if [ "$arm_mt6261" = "yes" ]; then
++        mkdir -p $OBJDIR/target/arch/arm/mt6261
++    fi
+     echo "ok."
+ 
+     ODIR=$OBJDIR
+@@ -398,6 +421,10 @@ for ARCH in $arch_list; do
+     if [ "$xbox" = "yes" ]; then
+         config_set_boolean CONFIG_XBOX >> $ODIR/config.xml
+     fi
++    if [ "$arm_mt6261" = "yes" ]; then
++        config_set_boolean CONFIG_ARM_MT6261 >> $ODIR/config.xml
++        config_set_boolean CONFIG_IMAGE_ELF >> $ODIR/config.xml
++    fi
+     if [ "$targetbigendian" = "yes" ]; then
+         config_set_boolean CONFIG_BIG_ENDIAN >> $ODIR/config.xml
+     else
+diff --git a/include/arch/arm/asmdefs.h b/include/arch/arm/asmdefs.h
+new file mode 100644
+index 0000000..24c4859
+--- /dev/null
++++ b/include/arch/arm/asmdefs.h
+@@ -0,0 +1,26 @@
++/* include/arch/arm/asmdefs.h
++ * OpenPhone — ARM assembly helper macros
++ *
++ * Copyright (C) 2026 OpenPhone Project
++ * SPDX-License-Identifier: GPL-2.0-only
++ */
++
++#ifndef ARCH_ARM_ASMDEFS_H
++#define ARCH_ARM_ASMDEFS_H
++
++#ifdef __ASSEMBLER__
++
++/* Standard function prologue/epilogue for ARM AAPCS */
++.macro FUNC_START name
++    .global \name
++    .type   \name, %function
++\name:
++.endm
++
++.macro FUNC_END name
++    .size \name, . - \name
++.endm
++
++#endif /* __ASSEMBLER__ */
++
++#endif /* ARCH_ARM_ASMDEFS_H */
+diff --git a/include/arch/arm/elf.h b/include/arch/arm/elf.h
+new file mode 100644
+index 0000000..56773bc
+--- /dev/null
++++ b/include/arch/arm/elf.h
+@@ -0,0 +1,15 @@
++/* include/arch/arm/elf.h
++ * OpenPhone — ARM ELF definitions
++ *
++ * Copyright (C) 2026 OpenPhone Project
++ * SPDX-License-Identifier: GPL-2.0-only
++ */
++
++#ifndef ARCH_ARM_ELF_H
++#define ARCH_ARM_ELF_H
++
++#define ARCH_ELF_MACHINE    40      /* EM_ARM                               */
++#define ARCH_ELF_DATA       1       /* ELFDATA2LSB — little-endian          */
++#define ARCH_ELF_CLASS      1       /* ELFCLASS32                           */
++
++#endif /* ARCH_ARM_ELF_H */
+diff --git a/include/arch/arm/io.h b/include/arch/arm/io.h
+new file mode 100644
+index 0000000..db7aa77
+--- /dev/null
++++ b/include/arch/arm/io.h
+@@ -0,0 +1,29 @@
++/* include/arch/arm/io.h
++ * OpenPhone — ARM memory-mapped I/O
++ *
++ * Copyright (C) 2026 OpenPhone Project
++ * SPDX-License-Identifier: GPL-2.0-only
++ */
++
++#ifndef ARCH_ARM_IO_H
++#define ARCH_ARM_IO_H
++
++#include "types.h"
++
++static inline u8  read8 (u32 addr) { return *(volatile u8  *)addr; }
++static inline u16 read16(u32 addr) { return *(volatile u16 *)addr; }
++static inline u32 read32(u32 addr) { return *(volatile u32 *)addr; }
++
++static inline void write8 (u32 addr, u8  val) { *(volatile u8  *)addr = val; }
++static inline void write16(u32 addr, u16 val) { *(volatile u16 *)addr = val; }
++static inline void write32(u32 addr, u32 val) { *(volatile u32 *)addr = val; }
++
++/* OpenBIOS uses these macros in drivers */
++#define inb(p)      read8(p)
++#define inw(p)      read16(p)
++#define inl(p)      read32(p)
++#define outb(v,p)   write8(p,v)
++#define outw(v,p)   write16(p,v)
++#define outl(v,p)   write32(p,v)
++
++#endif /* ARCH_ARM_IO_H */
+diff --git a/include/arch/arm/types.h b/include/arch/arm/types.h
+new file mode 100644
+index 0000000..f163288
+--- /dev/null
++++ b/include/arch/arm/types.h
+@@ -0,0 +1,28 @@
++/* include/arch/arm/types.h
++ * OpenPhone — ARM type definitions
++ *
++ * Copyright (C) 2026 OpenPhone Project
++ * SPDX-License-Identifier: GPL-2.0-only
++ */
++
++#ifndef ARCH_ARM_TYPES_H
++#define ARCH_ARM_TYPES_H
++
++typedef unsigned char       u8;
++typedef unsigned short      u16;
++typedef unsigned int        u32;
++typedef unsigned long long  u64;
++
++typedef signed char         s8;
++typedef signed short        s16;
++typedef signed int          s32;
++typedef signed long long    s64;
++
++typedef u32                 ucell;      /* unsigned cell — 32-bit on ARM    */
++typedef s32                 cell;       /* signed cell                      */
++typedef u32                 uaddr;      /* address type                     */
++
++#define BITS_PER_LONG       32
++#define UCELL_MAX           0xFFFFFFFFUL
++
++#endif /* ARCH_ARM_TYPES_H */
