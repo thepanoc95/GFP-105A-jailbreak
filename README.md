@@ -24,7 +24,7 @@ This project focuses on:
 
 - Device: Gradiente Neo Flip GFP-105A  
 - SoC: MediaTek MT6261  
-- CPU Architecture: ARM  
+- CPU Architecture: ARMv5  
 - Storage: NOR Flash  
 
 This is a constrained embedded environment. There is no operating system, no memory protection, and no abstraction layer once execution is under your control.
