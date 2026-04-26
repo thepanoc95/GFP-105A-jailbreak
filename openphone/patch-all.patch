@@ -295,7 +295,7 @@ index 0000000..48d8ec1
 +}
 diff --git a/arch/arm/mt6261/cpu.fs b/arch/arm/mt6261/cpu.fs
 new file mode 100644
-index 0000000..15f5eb8
+index 0000000..aee4a06
 --- /dev/null
 +++ b/arch/arm/mt6261/cpu.fs
 @@ -0,0 +1,142 @@
@@ -415,7 +415,7 @@ index 0000000..15f5eb8
 +\ ( -- )  Switch output colors to error (red)
 +: lcd-error-color   ( -- )  lcd_set_color_error ;
 +
-+\ ( -- )  Switch output colors to prompt (cyan)  
++\ ( -- )  Switch output colors to prompt (cyan)
 +: lcd-prompt-color  ( -- )  lcd_set_color_prompt ;
 +
 +\ ( -- )  Restore normal colors
@@ -3105,7 +3105,7 @@ index 0000000..56773bc
 +#endif /* ARCH_ARM_ELF_H */
 diff --git a/include/arch/arm/io.h b/include/arch/arm/io.h
 new file mode 100644
-index 0000000..db7aa77
+index 0000000..8db04c6
 --- /dev/null
 +++ b/include/arch/arm/io.h
 @@ -0,0 +1,29 @@
@@ -3121,13 +3121,13 @@ index 0000000..db7aa77
 +
 +#include "types.h"
 +
-+static inline u8  read8 (u32 addr) { return *(volatile u8  *)addr; }
-+static inline u16 read16(u32 addr) { return *(volatile u16 *)addr; }
-+static inline u32 read32(u32 addr) { return *(volatile u32 *)addr; }
++static inline u8  read8 (uaddr addr) { return *(volatile u8  *)(unsigned long)addr; }
++static inline u16 read16(uaddr addr) { return *(volatile u16 *)(unsigned long)addr; }
++static inline u32 read32(uaddr addr) { return *(volatile u32 *)(unsigned long)addr; }
 +
-+static inline void write8 (u32 addr, u8  val) { *(volatile u8  *)addr = val; }
-+static inline void write16(u32 addr, u16 val) { *(volatile u16 *)addr = val; }
-+static inline void write32(u32 addr, u32 val) { *(volatile u32 *)addr = val; }
++static inline void write8 (uaddr addr, u8  val) { *(volatile u8  *)(unsigned long)addr = val; }
++static inline void write16(uaddr addr, u16 val) { *(volatile u16 *)(unsigned long)addr = val; }
++static inline void write32(uaddr addr, u32 val) { *(volatile u32 *)(unsigned long)addr = val; }
 +
 +/* OpenBIOS uses these macros in drivers */
 +#define inb(p)      read8(p)
@@ -3140,10 +3140,10 @@ index 0000000..db7aa77
 +#endif /* ARCH_ARM_IO_H */
 diff --git a/include/arch/arm/types.h b/include/arch/arm/types.h
 new file mode 100644
-index 0000000..f163288
+index 0000000..9c3cffe
 --- /dev/null
 +++ b/include/arch/arm/types.h
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,36 @@
 +/* include/arch/arm/types.h
 + * OpenPhone — ARM type definitions
 + *
@@ -3153,6 +3153,8 @@ index 0000000..f163288
 +
 +#ifndef ARCH_ARM_TYPES_H
 +#define ARCH_ARM_TYPES_H
++
++#include <inttypes.h>
 +
 +typedef unsigned char       u8;
 +typedef unsigned short      u16;
@@ -3166,9 +3168,15 @@ index 0000000..f163288
 +
 +typedef u32                 ucell;      /* unsigned cell — 32-bit on ARM    */
 +typedef s32                 cell;       /* signed cell                      */
++typedef u64                 ducell;     /* double-width unsigned cell       */
++typedef s64                 dcell;      /* double-width signed cell         */
 +typedef u32                 uaddr;      /* address type                     */
 +
 +#define BITS_PER_LONG       32
++#define BITS                32
 +#define UCELL_MAX           0xFFFFFFFFUL
++
++#define bitspercell         (sizeof(cell) << 3)
++#define bitsperdcell        (sizeof(dcell) << 3)
 +
 +#endif /* ARCH_ARM_TYPES_H */
