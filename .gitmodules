@@ -7,3 +7,6 @@
 [submodule "fcode-utils"]
 	path = fcode-utils
 	url = https://github.com/openbios/fcode-utils
+[submodule "config/linux/yaffs2"]
+	path = config/linux/yaffs2
+	url = https://github.com/Aleph-One-Ltd/yaffs2
