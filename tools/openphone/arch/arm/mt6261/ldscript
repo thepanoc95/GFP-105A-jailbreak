@@ -1,0 +1,68 @@
+/*
+ * arch/arm/mt6261/ldscript
+ * OpenPhone — MT6261 linker script for OpenBIOS Stage 1
+ * 
+ * Layout:
+ *   0x70006000  [GFH header - 0x60 bytes, patched by pack_gfh.py]
+ *   0x70006060  [ARM exception vectors]
+ *   0x70006080  [_start entry point]
+ *   0x70006140  [Code starts here]
+ *
+ * The BROM loads the entire image at 0x70006000 and jumps to
+ * entry point = load_addr + jump_off (from GFH).
+ * We set jump_off = 0x140, so BROM jumps to 0x70006140.
+ */
+
+ENTRY(_start)
+
+SECTIONS
+{
+    . = 0x70006000;
+    
+    /* ──── GFH header placeholder ──────────────────────────────────── */
+    /* This section will be overwritten by pack_gfh.py before flashing */
+    .gfh : { *(.gfh) }
+    
+    /* ──── ARM exception vector table ──────────────────────────────── */
+    .vectors : { *(.vectors) }
+    
+    /* ──── Code sections ───────────────────────────────────────────── */
+    .text.start : { *(.text.start) }
+    
+    . = 0x70006140;  /* Align to entry point */
+    
+    .text : {
+        *(.text)
+        *(.text.*)
+        *(.rodata)
+        *(.rodata.*)
+        KEEP(*(.eh_frame))
+    }
+    
+    . = ALIGN(4);
+    __etext = .;
+    
+    /* ──── Data section (will be initialized) ──────────────────────── */
+    .data : { *(.data) *(.data.*) }
+    . = ALIGN(4);
+    __edata = .;
+    
+    /* ──── BSS section (zero-initialized) ──────────────────────────── */
+    .bss : {
+        __bss_start = .;
+        *(.bss)
+        *(.bss.*)
+        *(COMMON)
+        __bss_end = .;
+    }
+    
+    . = ALIGN(4);
+    
+    /* ──── Stack starts at 0x7003FFFC, growing down ─────────────────── */
+    /* Total SRAM: 0x70000000 - 0x7003FFFF = 256 KB */
+    /* Stack top at 0x7003FFFC                      */
+    /* LCD framebuffer: 0x70016800 - 0x7003FFFC = 150 KB */
+    /* Our code space: 0x70006000 - 0x70016800 = ~65 KB available */
+    
+    ASSERT(. <= 0x70016800, "Stage 1 code too large, overlaps with LCD framebuffer")
+}

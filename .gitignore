@@ -14,3 +14,9 @@ out.bin
 *.obj
 *.a
 *.so
+
+# other source code
+openbios/
+
+# Operating System configs
+*.dtb
